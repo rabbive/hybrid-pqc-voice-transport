@@ -1,0 +1,27 @@
+[project]
+name = "hpqv"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Ashwanth Kumaravel", email = "ashwaanthh@melloul.store" }
+]
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "cryptography>=50.0.1",
+    "liboqs-python>=0.16.0",
+    "numpy>=2.4.6",
+    "opuslib>=3.0.1",
+]
+
+[project.scripts]
+hpqv = "hpqv:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+]
