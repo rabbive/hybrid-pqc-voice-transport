@@ -18,7 +18,9 @@ def seal(key, nonce_prefix, seq, opus_frame, flags=0):
 
 def open_(key, nonce_prefix, datagram):
     header, ct = datagram[:11], datagram[11:]
-    _, _, seq, flags = struct.unpack(">BBQB", header)
+    version, msg_type, seq, flags = struct.unpack(">BBQB", header)
+    if version != VERSION or msg_type != TYPE_VOICE:
+        raise ValueError("bad datagram header")
     nonce = nonce_prefix + struct.pack(">Q", seq)
     frame = ChaCha20Poly1305(key).decrypt(nonce, ct, header)
     return seq, flags, frame

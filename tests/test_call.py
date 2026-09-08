@@ -13,7 +13,8 @@ def test_end_to_end_voice_over_localhost():
     t = threading.Thread(target=responder); t.start()
     cli = socket.create_connection(("127.0.0.1", port))
     sess_a = c.run_initiator(cli, a_pub, a_sec, b_pub); t.join(); sess_b = box["b"]
-    assert sess_a == sess_b
+    assert sess_a[0] == sess_b[0]
+    assert sess_a[1] == sess_b[2] and sess_a[2] == sess_b[1]
 
     # voice over UDP
     ua, ub = open_udp(), open_udp()
@@ -28,3 +29,13 @@ def test_end_to_end_voice_over_localhost():
     assert sent == len(frames)
     assert len(out["frames"]) == len(frames)
     assert all(len(f) == len(pcm) for f in out["frames"])
+
+def test_bidirectional_uses_distinct_nonce_prefixes():
+    a_pub, a_sec = h.make_identity(); b_pub, b_sec = h.make_identity()
+    hello, kem = h.build_hello(a_pub, a_sec)
+    accept, sess_b = h.accept_hello(hello, a_pub)
+    sess_a = h.finish(accept, kem)
+    key_a, send_a, _ = sess_a
+    key_b, send_b, _ = sess_b
+    assert key_a == key_b            # same symmetric key
+    assert send_a != send_b          # different send-direction nonce prefix -> no nonce reuse at seq 0

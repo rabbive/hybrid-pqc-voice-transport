@@ -15,4 +15,5 @@ def test_handshake_over_tcp_localhost():
     cli = socket.create_connection(("127.0.0.1", port))
     out["a"] = c.run_initiator(cli, a_pub, a_sec, b_pub)
     t.join()
-    assert out["a"] == out["b"]
+    assert out["a"][0] == out["b"][0]
+    assert out["a"][1] == out["b"][2] and out["a"][2] == out["b"][1]

@@ -9,10 +9,10 @@ KEM_PUB_LEN = 1184
 SIG_PUB_LEN = 1952
 
 
-def derive(shared_secret: bytes) -> tuple[bytes, bytes]:
-    okm = HKDF(algorithm=hashes.SHA256(), length=36, salt=None,
+def derive(shared_secret: bytes) -> tuple[bytes, bytes, bytes]:
+    okm = HKDF(algorithm=hashes.SHA256(), length=40, salt=None,
                info=b"hpqv v1").derive(shared_secret)
-    return okm[:32], okm[32:36]
+    return okm[:32], okm[32:36], okm[36:40]
 
 
 def make_identity() -> tuple[bytes, bytes]:
@@ -42,10 +42,12 @@ def accept_hello(hello: bytes, trusted_sig_pub: bytes):
     kem = oqs.KeyEncapsulation(KEM_ALG)
     ct, shared = kem.encap_secret(kem_pub)
     accept = bytes([VERSION]) + ct
-    return accept, derive(shared)
+    key, prefix_i2r, prefix_r2i = derive(shared)
+    return accept, (key, prefix_r2i, prefix_i2r)
 
 
-def finish(accept: bytes, kem) -> tuple[bytes, bytes]:
+def finish(accept: bytes, kem) -> tuple[bytes, bytes, bytes]:
     ct = accept[1:]
     shared = kem.decap_secret(ct)
-    return derive(shared)
+    key, prefix_i2r, prefix_r2i = derive(shared)
+    return key, prefix_i2r, prefix_r2i

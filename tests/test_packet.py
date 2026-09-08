@@ -12,3 +12,10 @@ def test_oversize_frame_rejected():
     key, prefix = os.urandom(32), os.urandom(4)
     with pytest.raises(ValueError):
         p.seal(key, prefix, 1, b"x" * 1300)
+
+def test_bad_version_rejected():
+    key, prefix = os.urandom(32), os.urandom(4)
+    dg = bytearray(p.seal(key, prefix, 1, b"opusdata"))
+    dg[0] ^= 0xFF
+    with pytest.raises(ValueError):
+        p.open_(key, prefix, bytes(dg))

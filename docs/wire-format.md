@@ -6,7 +6,7 @@ Sig: ML-DSA-65
 Each record: 4-byte big-endian length ‖ payload.
 - Msg 1 (Initiator→Responder) HELLO: version(1B) ‖ kem_pub(1184B) ‖ sig_pub(1952B) ‖ sig_over(kem_pub‖sig_pub)(3309B)
 - Msg 2 (Responder→Initiator) ACCEPT: version(1B) ‖ kem_ciphertext(1088B)
-Both derive: HKDF-SHA256(shared_secret, info=b"hpqv v1") → 32B voice key ‖ 4B nonce prefix.
+Both derive: HKDF-SHA256(shared_secret, info=b"hpqv v1") → 32B key ‖ 4B nonce_prefix(initiator→responder) ‖ 4B nonce_prefix(responder→initiator); each direction uses its own prefix so the two streams never share a (key,nonce).
 
 ## Voice datagram (over UDP, ≤1200B total, DF set)
 header ‖ ciphertext‖tag
