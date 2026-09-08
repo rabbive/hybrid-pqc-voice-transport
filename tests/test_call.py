@@ -26,5 +26,5 @@ def test_end_to_end_voice_over_localhost():
     sent = call.send_stream(ua, ub.getsockname(), sess_a, frames)
     rx.join()
     assert sent == len(frames)
-    assert len(out["frames"]) >= 1
+    assert len(out["frames"]) == len(frames)
     assert all(len(f) == len(pcm) for f in out["frames"])

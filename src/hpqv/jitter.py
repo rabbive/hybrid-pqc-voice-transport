@@ -20,3 +20,12 @@ class JitterBuffer:
         self._seen.discard(seq)
         self._last = seq
         return frame
+
+    def flush(self):
+        out = []
+        while self._heap:
+            seq, frame = heapq.heappop(self._heap)
+            self._seen.discard(seq)
+            self._last = seq
+            out.append(frame)
+        return out

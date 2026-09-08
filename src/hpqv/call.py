@@ -30,6 +30,6 @@ def recv_stream(udp_sock, session, expected: int) -> list[bytes]:
         frame = jb.pop()
         if frame is not None:
             out.append(codec.decode(frame))
-    while (frame := jb.pop()) is not None:   # drain
+    for frame in jb.flush():
         out.append(codec.decode(frame))
     return out
