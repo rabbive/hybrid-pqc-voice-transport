@@ -1,6 +1,8 @@
 # Wire Format
 
 ## Handshake (over TCP, length-prefixed records)
+KEM: ML-KEM-768
+Sig: ML-DSA-65
 Each record: 4-byte big-endian length ‖ payload.
 - Msg 1 (Initiator→Responder) HELLO: version(1B) ‖ kem_pub(1184B) ‖ sig_pub(1952B) ‖ sig_over(kem_pub‖sig_pub)(3309B)
 - Msg 2 (Responder→Initiator) ACCEPT: version(1B) ‖ kem_ciphertext(1088B)
