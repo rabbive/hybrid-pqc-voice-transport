@@ -26,7 +26,16 @@ def test_smoke():
     by_key = {(r["name"], r["loss_pct"]): r for r in rows}
     for scheme in ("hybrid", "tcp", "quic"):
         assert float(by_key[(scheme, "0")]["voice_loss_pct"]) == pytest.approx(0, abs=1e-6)
-        assert float(by_key[(scheme, "20")]["voice_loss_pct"]) > 0
+
+    hybrid_loss_20 = float(by_key[("hybrid", "20")]["voice_loss_pct"])
+    quic_loss_20 = float(by_key[("quic", "20")]["voice_loss_pct"])
+    tcp_loss_20 = float(by_key[("tcp", "20")]["voice_loss_pct"])
+    assert hybrid_loss_20 > 0
+    assert quic_loss_20 > 0
+    # TCP is reliable: it must show near-zero loss at the app layer, well
+    # below UDP's raw datagram loss, or this reverts to the bug where IP-layer
+    # tx/rx counted TCP retransmissions as permanent loss.
+    assert tcp_loss_20 < hybrid_loss_20 - 5
 
     with open("results/ns3_latency.csv") as f:
         latency_rows = list(csv.DictReader(f))

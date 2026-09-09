@@ -9,6 +9,7 @@
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 
+#include <algorithm>
 #include <iomanip>
 #include <iostream>
 
@@ -25,6 +26,14 @@ bool g_hsDone = false;
 Ptr<PacketSink> g_hsSink;
 Ptr<Node> g_voiceSrcNode;
 Address g_voiceSinkAddr;
+uint64_t g_voiceTxBytes = 0;
+Ptr<PacketSink> g_voiceSink;
+
+void
+VoiceTxCallback (Ptr<const Packet> packet)
+{
+  g_voiceTxBytes += packet->GetSize ();
+}
 
 void
 StartVoice ()
@@ -38,6 +47,10 @@ StartVoice ()
 
   ApplicationContainer apps = onoff.Install (g_voiceSrcNode);
   Ptr<Application> app = apps.Get (0);
+  // Application-layer bytes sent, used (with the sink's GetTotalRx) for
+  // voice_loss_pct -- IP-layer tx/rx counts retransmitted TCP segments as
+  // extra "lost" packets and misrepresents TCP as lossy.
+  app->TraceConnectWithoutContext ("Tx", MakeCallback (&VoiceTxCallback));
   // Installed mid-simulation: relative StartTime/StopTime schedule from
   // "now" (the handshake completion time), not from t=0.
   app->SetStartTime (Seconds (0.0));
@@ -140,6 +153,7 @@ main (int argc, char *argv[])
   PacketSinkHelper voiceSinkHelper (voiceProto, InetSocketAddress (Ipv4Address::GetAny (), voicePort));
   ApplicationContainer voiceSinkApps = voiceSinkHelper.Install (nodes.Get (1));
   voiceSinkApps.Start (Seconds (0.0));
+  g_voiceSink = DynamicCast<PacketSink> (voiceSinkApps.Get (0));
 
   FlowMonitorHelper flowmonHelper;
   Ptr<FlowMonitor> monitor = flowmonHelper.InstallAll ();
@@ -171,11 +185,17 @@ main (int argc, char *argv[])
         {
           voiceJitterMs = stats.jitterSum.GetSeconds () * 1000.0 / (stats.rxPackets - 1);
         }
-      if (stats.txPackets > 0)
-        {
-          voiceLossPct = 100.0 * (double) (stats.txPackets - stats.rxPackets) / stats.txPackets;
-        }
       break;
+    }
+
+  // Application-layer loss: IP-layer tx/rx (above) counts every TCP
+  // retransmission as a fresh "lost" packet, which makes reliable TCP look
+  // as lossy as UDP. Bytes actually delivered to the sink vs. bytes the
+  // source app generated is what the voice call itself experiences.
+  if (g_voiceTxBytes > 0)
+    {
+      double delivered = (double) g_voiceSink->GetTotalRx () / (double) g_voiceTxBytes;
+      voiceLossPct = 100.0 * std::max (0.0, 1.0 - delivered);
     }
 
   Simulator::Destroy ();
