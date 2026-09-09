@@ -17,6 +17,16 @@ def recv_record(sock) -> bytes:
     (length,) = struct.unpack(">I", _recvn(sock, 4))
     return _recvn(sock, length)
 
+# Control-plane message types (sent post-handshake over the TCP channel).
+MSG_CALL_START, MSG_CALL_END, MSG_KEY_ROTATE = 1, 2, 3
+
+def send_control(sock, msg_type: int, payload: bytes = b"") -> None:
+    send_record(sock, bytes([msg_type]) + payload)
+
+def recv_control(sock) -> tuple:
+    rec = recv_record(sock)
+    return rec[0], rec[1:]
+
 def run_initiator(sock, sig_pub, sig_secret, peer_sig_pub):
     hello, kem, kem_pub = h.build_hello(sig_pub, sig_secret)
     send_record(sock, hello)

@@ -11,6 +11,17 @@ Dilithium identity; the initiator verifies resp_sig against the responder's
 pinned public key before decapsulating. Both identities are pinned out-of-band.
 Both derive: HKDF-SHA256(shared_secret, info=b"hpqv v1") → 32B key ‖ 4B nonce_prefix(initiator→responder) ‖ 4B nonce_prefix(responder→initiator); each direction uses its own prefix so the two streams never share a (key,nonce).
 
+## Control messages (over TCP, post-handshake, length-prefixed records)
+Each control record = msg_type(1B) ‖ payload, wrapped in the same 4-byte
+length-prefixed framing as the handshake.
+- MSG_CALL_START = 1 — begin a voice session.
+- MSG_CALL_END   = 2 — tear down.
+- MSG_KEY_ROTATE = 3 — both peers ratchet the session key.
+Key rotation (session.rotate): new_key ‖ prefixes = HKDF-SHA256(current key,
+info=b"hpqv rotate v1"). Both peers derive the same new key; each keeps its
+send/recv direction (prefixes ordered by a stable comparison so the two peers
+stay mirrored). After a rotate, per-direction sequence counters reset to 0.
+
 ## Voice datagram (over UDP, ≤1200B total, DF set)
 header ‖ ciphertext‖tag
 - header: version(1B) ‖ type(1B) ‖ seq(8B, big-endian) ‖ flags(1B)  = 11 bytes

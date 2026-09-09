@@ -17,3 +17,15 @@ def test_handshake_over_tcp_localhost():
     t.join()
     assert out["a"][0] == out["b"][0]
     assert out["a"][1] == out["b"][2] and out["a"][2] == out["b"][1]
+
+def test_control_message_round_trip():
+    s1, s2 = socket.socketpair()
+    c.send_control(s1, c.MSG_KEY_ROTATE, b"gen1")
+    t, payload = c.recv_control(s2)
+    assert t == c.MSG_KEY_ROTATE and payload == b"gen1"
+
+def test_control_message_empty_payload():
+    s1, s2 = socket.socketpair()
+    c.send_control(s1, c.MSG_CALL_START)
+    t, payload = c.recv_control(s2)
+    assert t == c.MSG_CALL_START and payload == b""
