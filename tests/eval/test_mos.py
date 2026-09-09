@@ -12,3 +12,9 @@ def test_loss_degrades_mos():
 def test_mos_clamped():
     assert 1.0 <= mos.mos(-50) <= 4.5
     assert 1.0 <= mos.mos(200) <= 4.5
+
+def test_delay_impairment_continuous_at_knee():
+    assert abs(mos.r_factor(177.2, 0, 0) - mos.r_factor(177.4, 0, 0)) < 0.1
+
+def test_higher_delay_lowers_mos():
+    assert mos.mos_from_network(300, 0, 0) < mos.mos_from_network(50, 0, 0)

@@ -3,11 +3,12 @@
 def r_factor(delay_ms: float, jitter_ms: float, loss_pct: float) -> float:
     R0, Is = 93.2, 0.0
     eff_delay = delay_ms + 2.0 * jitter_ms          # jitter buffer adds ~2x jitter
-    # Idd: delay impairment (approx, negligible <150ms, rises after)
-    if eff_delay < 160:
+    # G.107 Idd: single threshold at 177.3 ms; below it, delay impairment is
+    # ~linear; above it the extra term kicks in continuously (zero at the knee).
+    if eff_delay < 177.3:
         Id = 0.024 * eff_delay
     else:
-        Id = 0.024 * eff_delay + 0.11 * (eff_delay - 120)
+        Id = 0.024 * eff_delay + 0.11 * (eff_delay - 177.3)
     Ie, Bpl = 1.0, 20.0                              # Opus-like packet-loss robustness
     Ie_eff = Ie + (95 - Ie) * (loss_pct / (loss_pct + Bpl)) if loss_pct > 0 else Ie
     return R0 - Is - Id - Ie_eff
