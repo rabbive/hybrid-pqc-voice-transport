@@ -1,0 +1,23 @@
+import csv
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"))
+
+from run_eval import main
+
+
+def test_smoke():
+    main(quick=True, losses=[0, 20])
+
+    with open("results/eval.csv") as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) > 0
+
+    by_key = {(r["name"], r["loss_pct"]): r for r in rows}
+    assert int(by_key[("hybrid", "0")]["frag_count"]) == 0
+    assert int(by_key[("naive", "0")]["frag_count"]) > 0
+
+    for png in ("loss_vs_mos.png", "loss_vs_fragments.png", "latency_vs_ttfb.png"):
+        path = os.path.join("results", png)
+        assert os.path.getsize(path) > 0
