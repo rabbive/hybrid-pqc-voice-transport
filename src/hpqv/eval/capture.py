@@ -9,7 +9,11 @@ def capture(iface: str, out_path: str):
         yield proc
     finally:
         proc.terminate()
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
 
 
 def count_ip_fragments(pcap_path: str) -> int:

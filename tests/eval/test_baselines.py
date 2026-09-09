@@ -4,6 +4,12 @@ import subprocess
 import threading
 import time
 
+import shutil, pytest
+pytestmark = pytest.mark.skipif(
+    shutil.which("tc") is None or shutil.which("tshark") is None,
+    reason="needs Linux tc/tshark — run in the hpqv-eval container",
+)
+
 from hpqv import control as c
 from hpqv import handshake as h
 from hpqv.eval import baselines

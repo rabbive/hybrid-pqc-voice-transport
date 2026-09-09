@@ -195,11 +195,10 @@ def run_scenario(name, loss_pct, delay_ms, jitter_ms, n_frames=250) -> dict:
     try:
         seqs, arrivals, connect_time = _SCENARIOS[name](
             frames, loss_pct, delay_ms, jitter_ms, pcap)
+        frag_count = count_ip_fragments(pcap)
     finally:
         subprocess.run(["ip", "link", "set", "lo", "mtu", "65536"], check=True)
-
-    frag_count = count_ip_fragments(pcap)
-    os.unlink(pcap)
+        os.unlink(pcap)
 
     drop = stats.drop_rate(n_frames, seqs)
     jitter_measured = stats.mean_jitter_ms(arrivals) if arrivals else 0.0

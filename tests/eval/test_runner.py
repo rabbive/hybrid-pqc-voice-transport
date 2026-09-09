@@ -1,3 +1,9 @@
+import shutil, pytest
+pytestmark = pytest.mark.skipif(
+    shutil.which("tc") is None or shutil.which("tshark") is None,
+    reason="needs Linux tc/tshark — run in the hpqv-eval container",
+)
+
 from hpqv.eval.runner import run_scenario
 
 
