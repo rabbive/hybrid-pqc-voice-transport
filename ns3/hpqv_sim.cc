@@ -28,11 +28,44 @@ Ptr<Node> g_voiceSrcNode;
 Address g_voiceSinkAddr;
 uint64_t g_voiceTxBytes = 0;
 Ptr<PacketSink> g_voiceSink;
+Ptr<Node> g_hsSrcNode;
+Address g_hsSinkAddrGlobal;
+std::string g_hsProtoGlobal;
+uint32_t g_hsAttemptsLeft = 0;
 
 void
 VoiceTxCallback (Ptr<const Packet> packet)
 {
   g_voiceTxBytes += packet->GetSize ();
+}
+
+void
+SendHandshakeBurst ()
+{
+  if (g_hsDone)
+    {
+      return;
+    }
+  // Bounded to hsBytes per attempt (same as the TCP schemes' BulkSend), so a
+  // single attempt never floods the link. Lost attempts are retried after an
+  // RTO-like gap -- idle in between, unlike a single unbounded stream -- a
+  // proxy for QUIC's own handshake-packet retransmission on loss.
+  OnOffHelper onoffHs (g_hsProtoGlobal, g_hsSinkAddrGlobal);
+  onoffHs.SetAttribute ("DataRate", DataRateValue (DataRate ("100Mbps")));
+  onoffHs.SetAttribute ("PacketSize", UintegerValue (1400));
+  onoffHs.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
+  onoffHs.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1e9]"));
+  onoffHs.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+  ApplicationContainer apps = onoffHs.Install (g_hsSrcNode);
+  Ptr<Application> app = apps.Get (0);
+  app->SetStartTime (Seconds (0.0));
+  app->Initialize ();
+
+  if (g_hsAttemptsLeft > 0)
+    {
+      g_hsAttemptsLeft--;
+      Simulator::Schedule (MilliSeconds (200), &SendHandshakeBurst);
+    }
 }
 
 void
@@ -119,28 +152,24 @@ main (int argc, char *argv[])
   std::string voiceProto = (g_scheme == "tcp") ? "ns3::TcpSocketFactory" : "ns3::UdpSocketFactory";
 
   Address hsSinkAddr (InetSocketAddress (ifaces.GetAddress (1), hsPort));
-  ApplicationContainer hsSenderApp;
   if (hsIsTcp)
     {
       BulkSendHelper bulk (hsProto, hsSinkAddr);
       bulk.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
-      hsSenderApp = bulk.Install (nodes.Get (0));
+      ApplicationContainer hsSenderApp = bulk.Install (nodes.Get (0));
+      hsSenderApp.Start (Seconds (0.0));
     }
   else
     {
       // BulkSendHelper requires SOCK_STREAM, so the UDP-handshake (quic)
-      // scheme sends via OnOff instead. Left unbounded (no MaxBytes) so the
-      // stream keeps emitting datagrams past hsBytes under loss -- a proxy
-      // for QUIC's own handshake-packet retransmission, not a literal
-      // single burst.
-      OnOffHelper onoffHs (hsProto, hsSinkAddr);
-      onoffHs.SetAttribute ("DataRate", DataRateValue (DataRate ("100Mbps")));
-      onoffHs.SetAttribute ("PacketSize", UintegerValue (1400));
-      onoffHs.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1e9]"));
-      onoffHs.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
-      hsSenderApp = onoffHs.Install (nodes.Get (0));
+      // scheme sends via bounded OnOff bursts (see SendHandshakeBurst)
+      // instead of a single unbounded stream that would flood the link.
+      g_hsSrcNode = nodes.Get (0);
+      g_hsSinkAddrGlobal = hsSinkAddr;
+      g_hsProtoGlobal = hsProto;
+      g_hsAttemptsLeft = 29; // up to 30 bounded bursts, ~6s of idle-gapped retries
+      SendHandshakeBurst ();
     }
-  hsSenderApp.Start (Seconds (0.0));
 
   PacketSinkHelper hsSinkHelper (hsProto, InetSocketAddress (Ipv4Address::GetAny (), hsPort));
   ApplicationContainer hsSinkApps = hsSinkHelper.Install (nodes.Get (1));
