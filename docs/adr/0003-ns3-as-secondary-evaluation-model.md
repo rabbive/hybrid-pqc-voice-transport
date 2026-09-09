@@ -17,7 +17,12 @@ Keep the real prototype + `tc netem` as the PRIMARY evidence (real handshake,
 real fragmentation-free proof by packet capture, real MOS from decoded audio).
 Add NS-3 as a SECONDARY, complementary model that provides what the real
 prototype cannot: controlled, repeatable, at-scale topology sweeps and a
-head-to-head against standard TCP/TLS and pure QUIC.
+head-to-head against a full-TCP transport arrangement and a QUIC (UDP+1RTT)
+arrangement. Note: all three modelled schemes (hybrid / tcp / quic) carry the
+SAME post-quantum handshake material (real liboqs byte sizes + CPU cost) — they
+differ only in TRANSPORT (where the handshake and voice ride), not in the
+cryptographic scheme. This isolates the transport effect, which is the project's
+subject; it is not a classical-TLS-vs-PQC crypto comparison.
 
 In NS-3, PQC is modelled — not executed — as measured handshake byte volume
 (from the real liboqs sizes) plus measured handshake CPU time (from a real
