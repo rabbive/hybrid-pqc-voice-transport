@@ -27,27 +27,33 @@ def build_hello(sig_pub: bytes, sig_secret: bytes):
     signer = oqs.Signature(SIG_ALG, secret_key=sig_secret)
     sig = signer.sign(kem_pub + sig_pub)
     hello = bytes([VERSION]) + kem_pub + sig_pub + sig
-    return hello, kem
+    return hello, kem, kem_pub
 
 
-def accept_hello(hello: bytes, trusted_sig_pub: bytes):
+def accept_hello(hello: bytes, trusted_peer_sig_pub: bytes, my_sig_secret: bytes):
     kem_pub = hello[1:1 + KEM_PUB_LEN]
     sig_pub = hello[1 + KEM_PUB_LEN:1 + KEM_PUB_LEN + SIG_PUB_LEN]
     sig = hello[1 + KEM_PUB_LEN + SIG_PUB_LEN:]
-    if sig_pub != trusted_sig_pub:
+    if sig_pub != trusted_peer_sig_pub:
         raise ValueError("unpinned identity")
     verifier = oqs.Signature(SIG_ALG)
     if not verifier.verify(kem_pub + sig_pub, sig, sig_pub):
         raise ValueError("bad signature")
     kem = oqs.KeyEncapsulation(KEM_ALG)
     ct, shared = kem.encap_secret(kem_pub)
-    accept = bytes([VERSION]) + ct
+    resp_signer = oqs.Signature(SIG_ALG, secret_key=my_sig_secret)
+    resp_sig = resp_signer.sign(kem_pub + ct)
+    accept = bytes([VERSION]) + ct + resp_sig
     key, prefix_i2r, prefix_r2i = derive(shared)
     return accept, (key, prefix_r2i, prefix_i2r)
 
 
-def finish(accept: bytes, kem) -> tuple[bytes, bytes, bytes]:
-    ct = accept[1:]
+def finish(accept: bytes, kem, kem_pub: bytes, trusted_peer_sig_pub: bytes) -> tuple[bytes, bytes, bytes]:
+    ct = accept[1:1 + 1088]
+    resp_sig = accept[1 + 1088:]
+    verifier = oqs.Signature(SIG_ALG)
+    if not verifier.verify(kem_pub + ct, resp_sig, trusted_peer_sig_pub):
+        raise ValueError("bad responder signature")
     shared = kem.decap_secret(ct)
     key, prefix_i2r, prefix_r2i = derive(shared)
     return key, prefix_i2r, prefix_r2i
