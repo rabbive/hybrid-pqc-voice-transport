@@ -19,6 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev \
       iproute2 tshark \
       libopus0 libopus-dev \
+      ns3 libns3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Build the liboqs C shared library into the image. Without it, liboqs-python

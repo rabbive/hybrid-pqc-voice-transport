@@ -1,0 +1,237 @@
+// hpqv Track 3 secondary model: hybrid vs TCP/TLS vs QUIC transport over a
+// lossy/delayed point-to-point link. ns-3 has no official QUIC module, so the
+// "quic" scheme models its 1-RTT handshake as a single UDP burst rather than
+// a real QUIC handshake -- a proxy, not a protocol implementation.
+#include "ns3/applications-module.h"
+#include "ns3/core-module.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/network-module.h"
+#include "ns3/point-to-point-module.h"
+
+#include <algorithm>
+#include <iomanip>
+#include <iostream>
+
+using namespace ns3;
+
+namespace {
+
+std::string g_scheme;
+double g_hsMs = 0.0;
+double g_dur = 0.0;
+uint32_t g_hsBytes = 0;
+double g_ttfbMs = -1.0;
+bool g_hsDone = false;
+Ptr<PacketSink> g_hsSink;
+Ptr<Node> g_voiceSrcNode;
+Address g_voiceSinkAddr;
+uint64_t g_voiceTxBytes = 0;
+Ptr<PacketSink> g_voiceSink;
+Ptr<Node> g_hsSrcNode;
+Address g_hsSinkAddrGlobal;
+std::string g_hsProtoGlobal;
+uint32_t g_hsAttemptsLeft = 0;
+
+void
+VoiceTxCallback (Ptr<const Packet> packet)
+{
+  g_voiceTxBytes += packet->GetSize ();
+}
+
+void
+SendHandshakeBurst ()
+{
+  if (g_hsDone)
+    {
+      return;
+    }
+  // Bounded to hsBytes per attempt (same as the TCP schemes' BulkSend), so a
+  // single attempt never floods the link. Lost attempts are retried after an
+  // RTO-like gap -- idle in between, unlike a single unbounded stream -- a
+  // proxy for QUIC's own handshake-packet retransmission on loss.
+  OnOffHelper onoffHs (g_hsProtoGlobal, g_hsSinkAddrGlobal);
+  onoffHs.SetAttribute ("DataRate", DataRateValue (DataRate ("100Mbps")));
+  onoffHs.SetAttribute ("PacketSize", UintegerValue (1400));
+  onoffHs.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
+  onoffHs.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1e9]"));
+  onoffHs.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+  ApplicationContainer apps = onoffHs.Install (g_hsSrcNode);
+  Ptr<Application> app = apps.Get (0);
+  app->SetStartTime (Seconds (0.0));
+  app->Initialize ();
+
+  if (g_hsAttemptsLeft > 0)
+    {
+      g_hsAttemptsLeft--;
+      Simulator::Schedule (MilliSeconds (200), &SendHandshakeBurst);
+    }
+}
+
+void
+StartVoice ()
+{
+  std::string proto = (g_scheme == "tcp") ? "ns3::TcpSocketFactory" : "ns3::UdpSocketFactory";
+  OnOffHelper onoff (proto, g_voiceSinkAddr);
+  onoff.SetAttribute ("DataRate", DataRateValue (DataRate ("64kbps")));
+  onoff.SetAttribute ("PacketSize", UintegerValue (160));
+  onoff.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1e9]"));
+  onoff.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+
+  ApplicationContainer apps = onoff.Install (g_voiceSrcNode);
+  Ptr<Application> app = apps.Get (0);
+  // Application-layer bytes sent, used (with the sink's GetTotalRx) for
+  // voice_loss_pct -- IP-layer tx/rx counts retransmitted TCP segments as
+  // extra "lost" packets and misrepresents TCP as lossy.
+  app->TraceConnectWithoutContext ("Tx", MakeCallback (&VoiceTxCallback));
+  // Installed mid-simulation: relative StartTime/StopTime schedule from
+  // "now" (the handshake completion time), not from t=0.
+  app->SetStartTime (Seconds (0.0));
+  app->SetStopTime (Seconds (g_dur));
+  app->Initialize ();
+}
+
+void
+HandshakeRxCallback (Ptr<const Packet>, const Address &)
+{
+  if (g_hsDone || g_hsSink->GetTotalRx () < g_hsBytes)
+    {
+      return;
+    }
+  g_hsDone = true;
+  g_ttfbMs = Simulator::Now ().GetSeconds () * 1000.0 + g_hsMs;
+  StartVoice ();
+}
+
+} // namespace
+
+int
+main (int argc, char *argv[])
+{
+  g_scheme = "hybrid";
+  double loss = 0.0;
+  double delayMs = 50.0;
+  g_hsBytes = 10842;
+  g_hsMs = 1.0;
+  g_dur = 2.0;
+
+  CommandLine cmd;
+  cmd.AddValue ("scheme", "hybrid|tcp|quic", g_scheme);
+  cmd.AddValue ("loss", "packet loss rate [0,1]", loss);
+  cmd.AddValue ("delayMs", "link RTT in ms", delayMs);
+  cmd.AddValue ("hsBytes", "handshake payload size in bytes", g_hsBytes);
+  cmd.AddValue ("hsMs", "fixed handshake CPU cost in ms", g_hsMs);
+  cmd.AddValue ("dur", "voice phase duration in seconds", g_dur);
+  cmd.Parse (argc, argv);
+
+  NodeContainer nodes;
+  nodes.Create (2);
+
+  PointToPointHelper p2p;
+  p2p.SetDeviceAttribute ("DataRate", StringValue ("10Mbps"));
+  p2p.SetChannelAttribute ("Delay", TimeValue (MilliSeconds (delayMs / 2.0)));
+  NetDeviceContainer devices = p2p.Install (nodes);
+
+  Ptr<RateErrorModel> errorModel = CreateObject<RateErrorModel> ();
+  errorModel->SetAttribute ("ErrorUnit", EnumValue (RateErrorModel::ERROR_UNIT_PACKET));
+  errorModel->SetAttribute ("ErrorRate", DoubleValue (loss));
+  devices.Get (1)->SetAttribute ("ReceiveErrorModel", PointerValue (errorModel));
+
+  InternetStackHelper stack;
+  stack.Install (nodes);
+
+  Ipv4AddressHelper address;
+  address.SetBase ("10.1.1.0", "255.255.255.0");
+  Ipv4InterfaceContainer ifaces = address.Assign (devices);
+
+  uint16_t hsPort = 5000;
+  uint16_t voicePort = 5001;
+
+  bool hsIsTcp = (g_scheme == "tcp" || g_scheme == "hybrid");
+  std::string hsProto = hsIsTcp ? "ns3::TcpSocketFactory" : "ns3::UdpSocketFactory";
+  std::string voiceProto = (g_scheme == "tcp") ? "ns3::TcpSocketFactory" : "ns3::UdpSocketFactory";
+
+  Address hsSinkAddr (InetSocketAddress (ifaces.GetAddress (1), hsPort));
+  if (hsIsTcp)
+    {
+      BulkSendHelper bulk (hsProto, hsSinkAddr);
+      bulk.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
+      ApplicationContainer hsSenderApp = bulk.Install (nodes.Get (0));
+      hsSenderApp.Start (Seconds (0.0));
+    }
+  else
+    {
+      // BulkSendHelper requires SOCK_STREAM, so the UDP-handshake (quic)
+      // scheme sends via bounded OnOff bursts (see SendHandshakeBurst)
+      // instead of a single unbounded stream that would flood the link.
+      g_hsSrcNode = nodes.Get (0);
+      g_hsSinkAddrGlobal = hsSinkAddr;
+      g_hsProtoGlobal = hsProto;
+      g_hsAttemptsLeft = 29; // up to 30 bounded bursts, ~6s of idle-gapped retries
+      SendHandshakeBurst ();
+    }
+
+  PacketSinkHelper hsSinkHelper (hsProto, InetSocketAddress (Ipv4Address::GetAny (), hsPort));
+  ApplicationContainer hsSinkApps = hsSinkHelper.Install (nodes.Get (1));
+  hsSinkApps.Start (Seconds (0.0));
+  g_hsSink = DynamicCast<PacketSink> (hsSinkApps.Get (0));
+  g_hsSink->TraceConnectWithoutContext ("Rx", MakeCallback (&HandshakeRxCallback));
+
+  g_voiceSrcNode = nodes.Get (0);
+  g_voiceSinkAddr = InetSocketAddress (ifaces.GetAddress (1), voicePort);
+  PacketSinkHelper voiceSinkHelper (voiceProto, InetSocketAddress (Ipv4Address::GetAny (), voicePort));
+  ApplicationContainer voiceSinkApps = voiceSinkHelper.Install (nodes.Get (1));
+  voiceSinkApps.Start (Seconds (0.0));
+  g_voiceSink = DynamicCast<PacketSink> (voiceSinkApps.Get (0));
+
+  FlowMonitorHelper flowmonHelper;
+  Ptr<FlowMonitor> monitor = flowmonHelper.InstallAll ();
+
+  // Bounded but generous: covers handshake retransmission under loss plus
+  // the full voice phase.
+  Simulator::Stop (Seconds (g_dur + 60.0));
+  Simulator::Run ();
+
+  double voiceDelayMs = 0.0;
+  double voiceJitterMs = 0.0;
+  double voiceLossPct = 0.0;
+
+  Ptr<Ipv4FlowClassifier> classifier =
+      DynamicCast<Ipv4FlowClassifier> (flowmonHelper.GetClassifier ());
+  for (const auto &kv : monitor->GetFlowStats ())
+    {
+      Ipv4FlowClassifier::FiveTuple tuple = classifier->FindFlow (kv.first);
+      if (tuple.destinationPort != voicePort)
+        {
+          continue;
+        }
+      const FlowMonitor::FlowStats &stats = kv.second;
+      if (stats.rxPackets > 0)
+        {
+          voiceDelayMs = stats.delaySum.GetSeconds () * 1000.0 / stats.rxPackets;
+        }
+      if (stats.rxPackets > 1)
+        {
+          voiceJitterMs = stats.jitterSum.GetSeconds () * 1000.0 / (stats.rxPackets - 1);
+        }
+      break;
+    }
+
+  // Application-layer loss: IP-layer tx/rx (above) counts every TCP
+  // retransmission as a fresh "lost" packet, which makes reliable TCP look
+  // as lossy as UDP. Bytes actually delivered to the sink vs. bytes the
+  // source app generated is what the voice call itself experiences.
+  if (g_voiceTxBytes > 0)
+    {
+      double delivered = (double) g_voiceSink->GetTotalRx () / (double) g_voiceTxBytes;
+      voiceLossPct = 100.0 * std::max (0.0, 1.0 - delivered);
+    }
+
+  Simulator::Destroy ();
+
+  std::cout << std::fixed << std::setprecision (3) << g_scheme << "," << loss << "," << delayMs
+            << "," << g_ttfbMs << "," << voiceDelayMs << "," << voiceJitterMs << ","
+            << voiceLossPct << std::endl;
+
+  return 0;
+}
