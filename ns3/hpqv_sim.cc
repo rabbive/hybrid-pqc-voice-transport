@@ -106,9 +106,27 @@ main (int argc, char *argv[])
   std::string voiceProto = (g_scheme == "tcp") ? "ns3::TcpSocketFactory" : "ns3::UdpSocketFactory";
 
   Address hsSinkAddr (InetSocketAddress (ifaces.GetAddress (1), hsPort));
-  BulkSendHelper bulk (hsProto, hsSinkAddr);
-  bulk.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
-  ApplicationContainer hsSenderApp = bulk.Install (nodes.Get (0));
+  ApplicationContainer hsSenderApp;
+  if (hsIsTcp)
+    {
+      BulkSendHelper bulk (hsProto, hsSinkAddr);
+      bulk.SetAttribute ("MaxBytes", UintegerValue (g_hsBytes));
+      hsSenderApp = bulk.Install (nodes.Get (0));
+    }
+  else
+    {
+      // BulkSendHelper requires SOCK_STREAM, so the UDP-handshake (quic)
+      // scheme sends via OnOff instead. Left unbounded (no MaxBytes) so the
+      // stream keeps emitting datagrams past hsBytes under loss -- a proxy
+      // for QUIC's own handshake-packet retransmission, not a literal
+      // single burst.
+      OnOffHelper onoffHs (hsProto, hsSinkAddr);
+      onoffHs.SetAttribute ("DataRate", DataRateValue (DataRate ("100Mbps")));
+      onoffHs.SetAttribute ("PacketSize", UintegerValue (1400));
+      onoffHs.SetAttribute ("OnTime", StringValue ("ns3::ConstantRandomVariable[Constant=1e9]"));
+      onoffHs.SetAttribute ("OffTime", StringValue ("ns3::ConstantRandomVariable[Constant=0]"));
+      hsSenderApp = onoffHs.Install (nodes.Get (0));
+    }
   hsSenderApp.Start (Seconds (0.0));
 
   PacketSinkHelper hsSinkHelper (hsProto, InetSocketAddress (Ipv4Address::GetAny (), hsPort));
