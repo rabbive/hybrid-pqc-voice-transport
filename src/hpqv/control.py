@@ -18,13 +18,13 @@ def recv_record(sock) -> bytes:
     return _recvn(sock, length)
 
 def run_initiator(sock, sig_pub, sig_secret, peer_sig_pub):
-    hello, kem = h.build_hello(sig_pub, sig_secret)
+    hello, kem, kem_pub = h.build_hello(sig_pub, sig_secret)
     send_record(sock, hello)
     accept = recv_record(sock)
-    return h.finish(accept, kem)
+    return h.finish(accept, kem, kem_pub, peer_sig_pub)
 
 def run_responder(sock, sig_pub, sig_secret, peer_sig_pub):
     hello = recv_record(sock)
-    accept, session = h.accept_hello(hello, peer_sig_pub)
+    accept, session = h.accept_hello(hello, peer_sig_pub, sig_secret)
     send_record(sock, accept)
     return session

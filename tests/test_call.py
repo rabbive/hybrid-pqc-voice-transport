@@ -32,9 +32,9 @@ def test_end_to_end_voice_over_localhost():
 
 def test_bidirectional_uses_distinct_nonce_prefixes():
     a_pub, a_sec = h.make_identity(); b_pub, b_sec = h.make_identity()
-    hello, kem = h.build_hello(a_pub, a_sec)
-    accept, sess_b = h.accept_hello(hello, a_pub)
-    sess_a = h.finish(accept, kem)
+    hello, kem, kem_pub = h.build_hello(a_pub, a_sec)
+    accept, sess_b = h.accept_hello(hello, a_pub, b_sec)
+    sess_a = h.finish(accept, kem, kem_pub, b_pub)
     key_a, send_a, _ = sess_a
     key_b, send_b, _ = sess_b
     assert key_a == key_b            # same symmetric key
