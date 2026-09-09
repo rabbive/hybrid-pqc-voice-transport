@@ -120,13 +120,32 @@ shared contract between them is the wire-format document (Phase 0).
   reorders and drops late frames correctly.
 - audio: WAV → Opus encode → decode round-trip produces sane output.
 
-### System evaluation (eval harness)
+### System evaluation — two corroborating tracks
+
+**Track A — real prototype (PRIMARY evidence).** The real handshake + Opus voice,
+run on a Linux environment (Docker container on the macOS dev machine, or any
+Linux box — `tc netem` does not run on macOS).
 - Baselines: hybrid vs naive-PQC-over-UDP vs TCP/TLS-PQC.
-- Impairment via tc netem: primary sweep on packet loss (0, 5, 10, 20, 30%) at
+- Impairment via `tc netem`: primary sweep on packet loss (0, 5, 10, 20, 30%) at
   fixed 50 ms latency and 10 ms jitter; secondary latency sweep for TTFB. 5 runs
   per condition, report median.
-- Metrics: fragment count (target 0 for hybrid, >0 for naive), MOS via E-model,
-  TTFB, jitter, drop rate. Auto-generated graphs.
+- Metrics: fragment count from packet capture (target 0 for hybrid, >0 for
+  naive — the fragmentation-free proof), MOS via E-model, TTFB, jitter, drop
+  rate. This track also proves Opus FEC functionally (loss-recovery).
+
+**Track B — NS-3 model (SECONDARY, for scale + panel expectation, see ADR-0003).**
+PQC modelled as measured handshake byte volume (real liboqs sizes) + measured
+handshake CPU time (real liboqs benchmark) injected as delay; voice as a
+constant-bit-rate 20 ms-frame traffic generator. Runs in the same Linux
+container.
+- Baselines the real prototype can't easily host: standard TCP/TLS and **pure
+  QUIC**, alongside the hybrid model.
+- Same impairment sweeps; stats via `flow-monitor` (delay/jitter/loss).
+- MOS via the SAME ITU-T E-model (G.107) as Track A, so the two tracks are
+  directly comparable.
+
+Both tracks share one E-model MOS pipeline and one graphing step, so results
+line up side by side in the report.
 
 ## Tooling
 
@@ -142,13 +161,25 @@ slide deck.
 
 ## Risks & Open Questions
 
-- **NS-3 mandate (highest priority):** confirm with the guide in week 1 whether
-  NS-3 is a hard requirement or whether rigorous real-prototype evaluation
-  suffices. This is the only open item that reshapes the plan (see ADR-0001).
-- liboqs-python build/install friction across the team's machines — validate in
-  Phase 1 on all three setups.
+- **NS-3 scope — RESOLVED (2026-09-09):** NS-3 is in scope as the secondary
+  evaluation model (ADR-0003), because the panel expects it and the ~2-month
+  window allows it. The real prototype + `tc netem` remains the primary evidence.
+- **Linux environment is required for all evaluation** (`tc netem` and NS-3 do
+  not run on macOS). Target: a Docker Linux container on the dev machine. This is
+  the evaluation phase's go/no-go — verify `tc netem` works in the container
+  (needs `--cap-add=NET_ADMIN`) before building the harness.
+- **NS-3 build/learning curve** is the largest time sink of the evaluation phase;
+  schedule it first within Track B.
+- liboqs-python build/install friction across the team's machines — validated on
+  the primary dev machine; re-check on the other two setups.
 - Real-time audio timing under Python's scheduler — the 20 ms cadence may need
   care; if Python jitter dominates, revisit buffer sizing before blaming the network.
+
+## Follow-on scope (post core-prototype)
+
+- **Hardening (ADR-0002):** responder authentication (mutual auth) + control-plane
+  messages (call setup/teardown, key rotation). Buildable on the existing code.
+- **Evaluation (Tracks A + B above):** requires the Linux environment.
 
 ## Stretch (only after core lands)
 
