@@ -150,7 +150,7 @@ of frame *N* inside packet *N+1*. Recovery is therefore a decoder action: when a
 packet is lost, the next packet is decoded with the FEC flag set to reconstruct
 the missing frame, falling back to concealment when consecutive packets are lost.
 
-**Testing.** 51 automated tests: unit tests per module, integration tests for the
+**Testing.** 53 automated tests: unit tests per module, integration tests for the
 end-to-end call, and experiment-level tests. Security-relevant behaviour is
 tested directly — a forged ACCEPT and a tampered ciphertext must both be
 rejected, an oversized datagram must be refused, and the two directions must use

@@ -31,7 +31,7 @@ so **nothing ever fragments** — while keeping voice latency low.
 
 ## 2. The three layers of testing
 
-### Layer 1 — Unit tests (44 tests)
+### Layer 1 — Unit tests (53 tests)
 Each module has tests that fail if its logic breaks. Run with `pytest`.
 
 | Test file | Tests | What it protects |
@@ -53,8 +53,13 @@ Each module has tests that fail if its logic breaks. Run with `pytest`.
 | `eval/test_pqc_cost.py` | 3 | Real liboqs byte sizes and timing |
 | `eval/test_ns3_smoke.py` | 2 | The ns-3 simulation compiles and behaves under loss |
 | `eval/test_graphs.py`, `test_run_*_smoke.py` | 3 | Figures and sweep drivers produce real output |
+| `eval/test_fec_recovery.py` | 3 | Opus in-band FEC **actually recovers** lost frames, and quality degrades monotonically with loss |
+| `eval/test_handshake_survival.py` | 3 | A fragmented handshake fails under loss where the hybrid survives |
+| `test_loss_control.py` | 2 | A mid-call loss change takes effect in the sender (the GUI slider) |
+| `test_docs_current.py` | 1 | These docs still match `results/*.csv` |
+| `test_smoke.py` | 1 | The package imports at all |
 
-**Status:** 44 tests. In the Linux container all 44 pass. On macOS, 32 pass and 12 skip
+**Status:** 53 tests. In the Linux container all 53 pass. On macOS, 38 pass and 15 skip
 (they need `tc`/`tshark`/ns-3, which only exist in the container — they skip cleanly, never fail).
 
 ### Layer 2 — Track 2: real-prototype measurement (PRIMARY evidence)
@@ -237,7 +242,7 @@ naive call does not connect at all.
 # Build the evaluation container (once)
 docker build -t hpqv-eval ./eval
 
-# Full unit-test suite (all 44 pass here)
+# Full unit-test suite (all 53 pass here)
 docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
   bash -c 'cd /work && uv sync -q && uv run pytest -q'
 
