@@ -99,37 +99,42 @@ MOS is computed from measured delay/jitter/loss with the ITU-T G.107 E-model.
 
 ### Results — loss sweep (`results/eval.csv`)
 
+<!-- BEGIN GENERATED: track2-loss -->
 | loss | hybrid frags | naive frags | tcp frags | hybrid MOS | naive MOS | tcp MOS |
 |---|---|---|---|---|---|---|
 | 0 % | **0** | 5 | 0 | 4.35 | 4.35 | 4.35 |
-| 5 % | **0** | 4 | 0 | 3.68 | 3.41 | 4.35 |
-| 10 % | **0** | 4 | 0 | 3.06 | 3.17 | 4.35 |
-| 20 % | **0** | 3 | 0 | 2.24 | 2.18 | 4.35 |
-| 30 % | **0** | 3 | 0 | 1.82 | 1.64 | 4.35 |
+| 5 % | **0** | 5 | 0 | 3.54 | 3.54 | 4.35 |
+| 10 % | **0** | 5 | 0 | 3.17 | 3.06 | 4.35 |
+| 20 % | **0** | 4 | 0 | 2.18 | 2.08 | 4.35 |
+| 30 % | **0** | 4 | 0 | 1.90 | 1.90 | 4.35 |
+<!-- END GENERATED: track2-loss -->
 
-TTFB: hybrid steady ≈ 47 ms at every loss level; **tcp degrades to 155 ms at 30 % loss**
-(retransmissions during setup).
+TTFB (full values in `results/eval.csv`): the hybrid's stays flat across the loss sweep, while
+tcp's is consistently higher and noisier — it pays for retransmissions during setup.
 
 ### Results — latency sweep (`results/eval_latency.csv`)
 
+<!-- BEGIN GENERATED: track2-latency -->
 | link delay | hybrid TTFB | naive TTFB | tcp TTFB |
 |---|---|---|---|
-| 20 ms | 12.8 ms | 14.8 ms | 24.4 ms |
-| 50 ms | 45.3 ms | 51.7 ms | 56.4 ms |
-| 100 ms | 99.4 ms | 97.4 ms | 109.1 ms |
-| 200 ms | 195.9 ms | 195.9 ms | 202.1 ms |
+| 20 ms | 13.6 ms | 14.4 ms | 23.6 ms |
+| 50 ms | 45.2 ms | 45.3 ms | 48.9 ms |
+| 100 ms | 98.1 ms | 100.3 ms | 106.0 ms |
+| 200 ms | 196.8 ms | 199.8 ms | 205.1 ms |
+<!-- END GENERATED: track2-latency -->
 
 ### How to read this
 1. **The fragmentation claim is proven.** Hybrid fragments **zero** packets at every loss level;
    naive always fragments. This is from real packet capture, not a model.
-2. **TCP is reliable but slow to start.** It never loses voice (flat MOS 4.35) yet its setup cost
-   grows with both loss (→155 ms) and RTT (~10 ms penalty at every delay).
+2. **TCP is reliable but slow to start.** It never loses voice — its MOS is flat across the whole
+   sweep — but its setup cost is consistently the highest of the three, at every loss level and
+   every RTT.
 3. **Voice quality degrades with loss as expected** for the UDP-based paths.
 
 ### Honest caveat you must be able to answer
-Naive's MOS is *not* meaningfully worse than hybrid's (4.35/4.35, 3.68/3.41, 3.06/**3.17**,
-2.24/2.18, 1.82/1.64) — at 10 % loss it is even slightly better. The differences are within
-run-to-run noise.
+Naive's MOS is *not* meaningfully worse than hybrid's — across the sweep above the two track each
+other closely, and depending on the run either can come out ahead at a given loss level. The
+differences are within run-to-run noise.
 
 **Why:** fragmentation affects the **handshake**, not the voice stream. Voice frames (~160 B of
 Opus) never fragment in either design; only the 10.8 KB handshake does. And on a local link the
@@ -149,22 +154,34 @@ handshake + UDP voice). Metrics from FlowMonitor; MOS via the **same** E-model a
 
 ### Results — loss sweep at 50 ms (`results/ns3_eval.csv`)
 
+<!-- BEGIN GENERATED: ns3-loss -->
 | loss | hybrid (loss / TTFB / MOS) | tcp (loss / MOS) | quic (loss / TTFB / MOS) |
 |---|---|---|---|
-| 0 % | 0 % / 131 ms / 4.38 | 0 % / 4.38 | 0 % / **35 ms** / 4.38 |
-| 5 % | 4.6 % / 179 ms / 3.78 | 0 % / 4.38 | 4.8 % / 35 ms / 3.75 |
-| 10 % | 10.0 % / 180 ms / 3.11 | 0 % / 4.38 | 10.2 % / 35 ms / 3.09 |
-| 20 % | 20.6 % / 179 ms / 2.26 | 0 % / 4.38 | 20.0 % / 227 ms / 2.29 |
-| 30 % | 27.7 % / 182 ms / 1.92 | 0 % / 4.38 | 27.3 % / 227 ms / 1.94 |
+| 0 % | 0.0 % / 131 ms / 4.38 | 0.0 % / 4.38 | 0.0 % / 35 ms / 4.38 |
+| 5 % | 4.6 % / 179 ms / 3.78 | 0.0 % / 4.38 | 4.8 % / 35 ms / 3.75 |
+| 10 % | 10.0 % / 180 ms / 3.11 | 0.0 % / 4.38 | 10.2 % / 35 ms / 3.09 |
+| 20 % | 20.6 % / 179 ms / 2.26 | 0.0 % / 4.38 | 20.0 % / 227 ms / 2.29 |
+| 30 % | 27.7 % / 182 ms / 1.92 | 0.0 % / 4.38 | 27.3 % / 227 ms / 1.94 |
+<!-- END GENERATED: ns3-loss -->
 
 ### Results — latency sweep (`results/ns3_latency.csv`)
-TTFB at 0 % loss: QUIC **19.8 / 34.8 / 59.8 / 109.8 ms** for 20/50/100/200 ms delay, versus
-**56 / 131 / 256 / 506 ms** for hybrid and tcp — QUIC's 1-RTT setup is roughly *half* the
-round-trips of a TCP-based handshake.
+TTFB at 0 % loss:
+
+<!-- BEGIN GENERATED: ns3-latency -->
+| link delay | hybrid TTFB | tcp TTFB | quic TTFB |
+|---|---|---|---|
+| 20 ms | 56 ms | 56 ms | 20 ms |
+| 50 ms | 131 ms | 131 ms | 35 ms |
+| 100 ms | 256 ms | 256 ms | 60 ms |
+| 200 ms | 506 ms | 506 ms | 110 ms |
+<!-- END GENERATED: ns3-latency -->
+
+QUIC's 1-RTT setup needs roughly *half* the round-trips of a TCP-based handshake, so its TTFB
+grows far more slowly with link delay.
 
 ### How to read this
 - QUIC's UDP 1-RTT handshake is the **fastest to first byte** when the link is clean, but its
-  retries make it the slowest under heavy loss (227 ms at 20–30 %).
+  retries make it the slowest under heavy loss (see the table above).
 - TCP never drops voice, but see the limitation below before calling it "best".
 - Hybrid sits where it should: TCP-grade reliable setup, UDP-grade voice latency.
 
@@ -190,20 +207,24 @@ hurts the **handshake**, which is 10,842 bytes and splits into **8 IP fragments*
 design. Losing any one fragment destroys the whole datagram. We attempted 100 handshakes per
 condition:
 
-| Packet loss | naive success | theory `(1-p)^8` | hybrid success |
-|---|---|---|---|
-| 0 % | 100 % | 100 % | 100 % |
-| 5 % | 75 % | 66 % | 100 % |
-| 10 % | 39 % | 43 % | 100 % |
-| 20 % | **19 %** | 17 % | **99 %** |
-| 30 % | **2 %** | 6 % | **83 %** |
+<!-- BEGIN GENERATED: survival -->
+| packet loss | naive success (95% CI) | theory `(1-p)^8` | hybrid success (95% CI) | hybrid median time |
+|---|---|---|---|---|
+| 0 % | **100 %** (96–100) | 100 % | **100 %** (96–100) | 0.1 ms |
+| 5 % | **75 %** (66–82) | 66 % | **100 %** (96–100) | 0.2 ms |
+| 10 % | **39 %** (30–49) | 43 % | **100 %** (96–100) | 0.3 ms |
+| 20 % | **19 %** (13–28) | 17 % | **99 %** (95–100) | 420.8 ms |
+| 30 % | **2 %** (1–7) | 6 % | **83 %** (74–89) | 1019.6 ms |
+<!-- END GENERATED: survival -->
 
-**At 20 % loss the naive PQC handshake connects roughly one time in five; ours connects 99 times
-in 100. At 30 % loss naive manages 2 attempts in 100.** The hybrid pays for this in time rather
-than failure — its median handshake rises to ~0.42 s at 20 % and ~1.02 s at 30 % as TCP
-retransmits, and at 30 % it too fails 17 % of the time. Measurement tracks the `(1-p)^8`
-prediction, confirming the mechanism is fragment-loss amplification. Individual cells move a few
-points between runs; the shape is stable.
+**Once loss reaches 20 %, only a small minority of naive handshakes complete, while the hybrid
+still completes nearly all of them.** The hybrid pays for this in time rather than failure: its
+median handshake climbs into the hundreds of milliseconds and then past a second as TCP
+retransmits, and at the highest loss level it too starts failing a fraction of the time — the
+claim is a large margin, not invulnerability. Measurement tracks the `(1-p)^8` prediction,
+confirming the mechanism is fragment-loss amplification. Read the confidence intervals rather
+than the point values; at n=100 a cell moves several points between runs without meaning
+anything.
 
 This is the answer to *"if the MOS is the same, why does fragmentation matter?"* — because the
 naive call does not connect at all.
@@ -228,6 +249,18 @@ docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
 docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
   bash -c 'cd /work && uv sync -q && uv run python scripts/run_ns3.py'
 ```
+
+After re-running any sweep, regenerate the tables in this document so they match the new data:
+
+```bash
+python scripts/render_tables.py          # rewrite the generated tables
+python scripts/render_tables.py --check  # CI/test mode: non-zero exit if stale
+```
+
+Every result table here sits between `<!-- BEGIN GENERATED: ... -->` markers and is produced from
+`results/*.csv` — do not edit them by hand. `tests/test_docs_current.py` fails if a table drifts
+out of sync with the committed data, which is how we stop the report quietly contradicting its
+own numbers.
 
 Outputs land in `results/`: `eval.csv`, `eval_latency.csv`, `ns3_eval.csv`, `ns3_latency.csv`,
 and the figures `loss_vs_mos.png`, `loss_vs_fragments.png`, `latency_vs_ttfb.png`,
