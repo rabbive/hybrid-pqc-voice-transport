@@ -28,3 +28,10 @@ def test_moderate_loss_fec_recovers_frames_and_improves_snr():
     assert row["frames_lost"] > 0
     assert row["frames_recovered_by_fec"] > 0
     assert row["snr_fec_on_db"] > row["snr_fec_off_db"]
+
+
+def test_fec_off_degrades_monotonically_with_loss():
+    """More loss cannot mean better quality — fixed seed, so deterministic."""
+    rows = [fr.measure(loss_pct=p, seed=0, seconds=3.0) for p in [0, 5, 10, 20, 30]]
+    snrs = [r["snr_fec_off_db"] for r in rows]
+    assert snrs == sorted(snrs, reverse=True)

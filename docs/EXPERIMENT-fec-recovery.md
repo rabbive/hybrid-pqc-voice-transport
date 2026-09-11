@@ -28,9 +28,22 @@ silent/zero frame, same as the no-FEC baseline).
 - **Receiver A (FEC on):** for each lost packet, recover it from packet N+1 via
   `decode_fec=True` if N+1 arrived; otherwise emit a zero frame.
 - **Receiver B (FEC off):** every lost packet is a zero frame — no recovery attempted.
-- **Metric:** segmental SNR in dB (per-frame SNR vs. the original PCM, averaged) — a single
-  whole-signal SNR would be dominated by the loudest frames and hide per-frame concealment
-  damage.
+- **Metric:** segmental SNR in dB (per-frame SNR, averaged), measured against the **undamaged
+  decode of the same packets — not the original PCM.** Opus is a perceptual codec: it does not
+  preserve the waveform even at 0% loss, so the original sine wave already differs from a clean
+  Opus round-trip by a large, constant amount. Comparing the lossy reconstruction against the
+  *original* signal would bury the (smaller) damage loss/concealment causes underneath that
+  constant coding error — which is exactly what an earlier version of this experiment did, and
+  it produced a negative "SNR" at 0% loss and a non-monotonic curve (FEC-off *improved* from 20%
+  to 30% loss), both signs the reference was wrong. The reference here is instead: encode the
+  signal, decode every packet with nothing dropped, fresh decoder per encoder variant. That
+  reference is exactly what each receiver would produce on a perfect link, so any further SNR
+  loss measures only loss/concealment damage.
+- At 0% loss the lossy reconstruction is bit-identical to the reference (same encoder, same
+  decoder, nothing dropped), so per-frame noise power is exactly 0. `10*log10(signal/0)` is
+  infinite; we cap segmental SNR at **99.0 dB** (`SNR_CAP_DB` in `fec_recovery.py`) rather than
+  emit `inf`/`NaN`, and document the cap here rather than let a reader misread it as a real
+  number close to a measured ceiling.
 - `frames_recovered_by_fec` counts frames where recovery actually ran (the lost packet's
   successor arrived).
 
@@ -38,11 +51,11 @@ silent/zero frame, same as the no-FEC baseline).
 
 | packet loss | FEC-on SNR (dB) | FEC-off SNR (dB) | frames lost | frames recovered by FEC |
 |---|---|---|---|---|
-| 0 % | -1.11 | -1.12 | 0 | 0 |
-| 5 % | -1.08 | -2.71 | 8 | 7 |
-| 10 % | -1.08 | -2.60 | 11 | 10 |
-| 20 % | -1.03 | -2.33 | 26 | 20 |
-| 30 % | -1.19 | -1.68 | 39 | 28 |
+| 0 % | 99.00 (capped, identical to reference) | 99.00 (capped, identical to reference) | 0 | 0 |
+| 5 % | 63.60 | 37.25 | 8 | 7 |
+| 10 % | 60.11 | 30.59 | 11 | 10 |
+| 20 % | 47.42 | 23.89 | 26 | 20 |
+| 30 % | 33.74 | 10.03 | 39 | 28 |
 
 ![FEC recovery quality vs packet loss](../results/fec_recovery.png)
 
@@ -50,33 +63,41 @@ silent/zero frame, same as the no-FEC baseline).
 
 ## What this shows
 
-1. **FEC-on measurably beats FEC-off at every nonzero loss level.** The gap is largest at 5–20%
-   loss (roughly 1.3–1.6 dB), where most lost packets have a surviving successor to recover from.
-2. **`frames_recovered_by_fec` tracks loss almost 1:1** at moderate loss (e.g. 10/11 lost frames
+1. **FEC-on measurably beats FEC-off at every nonzero loss level** — by 26, 30, 24, and 24 dB at
+   5/10/20/30% loss respectively. This is a large, unambiguous gap, not a fraction of a dB lost
+   in coding noise (which is what the original, wrong reference produced).
+2. **Both curves now degrade monotonically as loss increases** — 99.00 → 63.60 → 60.11 → 47.42 →
+   33.74 dB for FEC-on, 99.00 → 37.25 → 30.59 → 23.89 → 10.03 dB for FEC-off. More loss always
+   means lower measured quality, which is the sanity check the previous (wrong-reference) version
+   of this experiment failed: it showed FEC-off *improving* from 20% to 30% loss, a direct
+   symptom of measuring against the wrong signal.
+3. **`frames_recovered_by_fec` tracks loss almost 1:1** at moderate loss (e.g. 10/11 lost frames
    recovered at 10% loss), confirming recovery is actually firing, not just configured.
-3. **The gap narrows at high loss (30%).** At 30% loss, consecutive losses become common, so a
-   lost packet's successor is often *also* lost — FEC has nothing to decode from and both
-   receivers fall back to the same zero-frame concealment for those frames. This is the expected
-   behavior of a single-frame-lookahead recovery scheme, not a bug.
-4. **At 0% loss, FEC-on and FEC-off perform identically** (within noise) — FEC has no packets to
-   recover, so enabling it costs nothing in reconstruction quality.
-5. **The absolute SNR is negative even with zero loss.** This is not a bug in the metric or the
-   codec: Opus has an encoder/decoder algorithmic delay (look-ahead), so the decoded sample stream
-   is time-shifted by a few milliseconds relative to the raw input, which tanks a naive
-   sample-domain SNR even for perceptually clean audio. Because both receivers share the same
-   encoder delay, the *relative* comparison (FEC-on vs FEC-off) is still meaningful — only the
-   absolute numbers should not be read as "quality is bad."
+4. **FEC-on's advantage shrinks in relative terms at high loss (30%)** but is still large (24 dB).
+   At 30% loss, consecutive losses become common, so a lost packet's successor is often *also*
+   lost — FEC has nothing to decode from and both receivers fall back to the same zero-frame
+   concealment for those frames. This is the expected behavior of a single-frame-lookahead
+   recovery scheme, not a bug.
+5. **At 0% loss, FEC-on and FEC-off are both at the cap** — the reconstruction is bit-identical to
+   the reference (nothing was ever dropped), so there is nothing to measure loss damage from. FEC
+   costs nothing in reconstruction quality when nothing is lost.
 
-**Bottom line: FEC demonstrably helps.** It is not a configured-but-unused CTL — decoding the
-next packet with `decode_fec=True` reconstructs frames that would otherwise be silence, and that
-shows up as several dB of measured SNR improvement across the loss range where it can act.
+**Bottom line: FEC demonstrably helps**, and now by a metric that isolates the effect correctly:
+decoding the next packet with `decode_fec=True` reconstructs frames that would otherwise be
+silence, worth tens of dB of segmental SNR versus zero-frame concealment across every loss level
+where recovery can act.
 
 ## Honest limitations
 
-- Segmental SNR in the time domain is not a perceptual quality metric (unlike PESQ/MOS used
-  elsewhere in this repo for the voice path). It is sensitive to the codec's algorithmic delay,
-  which is why the zero-loss baseline is negative rather than near +∞. Use it only for the
-  FEC-on-vs-FEC-off comparison at a fixed loss pattern, not as an absolute quality score.
+- Segmental SNR in the time domain is still not a perceptual quality metric (unlike PESQ/MOS used
+  elsewhere in this repo for the voice path) — it measures waveform distance, not perceived
+  loudness/pitch/masking effects. Fixed here by referencing the undamaged decode instead of the
+  raw input (see Method), which removes the codec's own coding error from the measurement, but it
+  still won't rank two *audibly similar* reconstructions correctly if they differ in ways the ear
+  doesn't weight linearly.
+- The 99.0 dB cap is a sentinel for "no measurable per-frame noise," not a real information-
+  theoretic ceiling — don't read it as "FEC gets you to 99 dB of quality," read it as "this frame
+  suffered no loss damage."
 - FEC recovers at most one frame of lookahead (frame N from packet N+1). Burst losses of 2+
   consecutive packets are only partially covered — this experiment measures and shows that
   falloff (30% loss row) rather than hiding it.

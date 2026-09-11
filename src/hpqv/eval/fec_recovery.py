@@ -12,7 +12,12 @@ We compare two receivers against the same lossy trace:
              packet if that packet arrived, else zero frame.
 
 Quality metric: segmental SNR (per-frame SNR in dB, averaged) against the
-original PCM, since a single whole-signal SNR is dominated by loud frames.
+UNDAMAGED DECODE of the same packets (not the original PCM). Opus is a
+perceptual codec — it does not preserve the waveform even with zero loss —
+so comparing against the original sine bakes in a large, constant coding
+error that swamps the much smaller damage loss/concealment actually causes.
+Comparing against "encode then decode with nothing dropped" isolates loss
+damage from coding error.
 """
 import random
 
@@ -39,21 +44,25 @@ def _frames(pcm: np.ndarray):
         yield pcm[i:i + FRAME_SAMPLES]
 
 
-def _segmental_snr_db(original: np.ndarray, reconstructed: np.ndarray) -> float:
-    """Average per-frame SNR in dB across all frames."""
+SNR_CAP_DB = 99.0  # sentinel for a frame with zero measured noise (avoids inf/NaN)
+
+
+def _segmental_snr_db(reference: np.ndarray, reconstructed: np.ndarray) -> float:
+    """Average per-frame SNR in dB across all frames, vs. `reference` (the
+    undamaged decode, NOT the raw input signal — see module docstring)."""
     snrs = []
-    for i in range(0, len(original), FRAME_SAMPLES):
-        orig = original[i:i + FRAME_SAMPLES].astype(np.float64)
+    for i in range(0, len(reference), FRAME_SAMPLES):
+        ref = reference[i:i + FRAME_SAMPLES].astype(np.float64)
         recon = reconstructed[i:i + FRAME_SAMPLES].astype(np.float64)
-        noise = orig - recon
-        signal_power = np.sum(orig ** 2)
+        noise = ref - recon
+        signal_power = np.sum(ref ** 2)
         noise_power = np.sum(noise ** 2)
         if noise_power == 0:
-            snrs.append(100.0)  # perfect reconstruction, cap to keep the average finite
+            snrs.append(SNR_CAP_DB)  # identical to reference: no measurable damage
         elif signal_power == 0:
             continue
         else:
-            snrs.append(10 * np.log10(signal_power / noise_power))
+            snrs.append(min(SNR_CAP_DB, 10 * np.log10(signal_power / noise_power)))
     return float(np.mean(snrs))
 
 
@@ -69,6 +78,17 @@ def measure(loss_pct: float, seed: int = 0, seconds: float = 3.0) -> dict:
     enc_off = OpusCodec(fec=False)
     packets_fec = [enc_fec.encode(f) for f in frames]
     packets_off = [enc_off.encode(f) for f in frames]
+
+    # Reference = undamaged decode of the SAME packets (no loss), one fresh
+    # decoder per encoder variant. This is the "expected" stream each
+    # receiver would produce with a perfect link — the only difference left
+    # is loss/concealment damage, not Opus's own coding error.
+    ref_dec_fec = OpusCodec(fec=True)
+    reference_fec = np.frombuffer(
+        b"".join(ref_dec_fec.decode(p) for p in packets_fec), dtype=np.int16)
+    ref_dec_off = OpusCodec(fec=False)
+    reference_off = np.frombuffer(
+        b"".join(ref_dec_off.decode(p) for p in packets_off), dtype=np.int16)
 
     zero_frame = np.zeros(FRAME_SAMPLES, dtype=np.int16).tobytes()
 
@@ -97,8 +117,8 @@ def measure(loss_pct: float, seed: int = 0, seconds: float = 3.0) -> dict:
 
     return {
         "loss_pct": loss_pct,
-        "snr_fec_on_db": _segmental_snr_db(pcm, recon_on),
-        "snr_fec_off_db": _segmental_snr_db(pcm, recon_off),
+        "snr_fec_on_db": _segmental_snr_db(reference_fec, recon_on),
+        "snr_fec_off_db": _segmental_snr_db(reference_off, recon_off),
         "frames_lost": sum(lost),
         "frames_recovered_by_fec": recovered,
     }
