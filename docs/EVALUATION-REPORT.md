@@ -193,15 +193,17 @@ condition:
 | Packet loss | naive success | theory `(1-p)^8` | hybrid success |
 |---|---|---|---|
 | 0 % | 100 % | 100 % | 100 % |
-| 5 % | 65 % | 66 % | 100 % |
-| 10 % | 51 % | 43 % | 100 % |
-| 20 % | **16 %** | 17 % | **99 %** |
-| 30 % | **10 %** | 6 % | **93 %** |
+| 5 % | 75 % | 66 % | 100 % |
+| 10 % | 39 % | 43 % | 100 % |
+| 20 % | **19 %** | 17 % | **99 %** |
+| 30 % | **2 %** | 6 % | **83 %** |
 
-**At 20 % loss the naive PQC handshake connects roughly one time in six; ours connects 99 times
-in 100.** The hybrid pays for this in time rather than failure — its median handshake rises to
-~1.26 s at 30 % loss as TCP retransmits. Measurement tracks the `(1-p)^8` prediction, confirming
-the mechanism is fragment-loss amplification.
+**At 20 % loss the naive PQC handshake connects roughly one time in five; ours connects 99 times
+in 100. At 30 % loss naive manages 2 attempts in 100.** The hybrid pays for this in time rather
+than failure — its median handshake rises to ~0.42 s at 20 % and ~1.02 s at 30 % as TCP
+retransmits, and at 30 % it too fails 17 % of the time. Measurement tracks the `(1-p)^8`
+prediction, confirming the mechanism is fragment-loss amplification. Individual cells move a few
+points between runs; the shape is stable.
 
 This is the answer to *"if the MOS is the same, why does fragmentation matter?"* — because the
 naive call does not connect at all.

@@ -13,7 +13,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "scripts"
 from run_eval import main
 
 
-def test_smoke():
+def test_smoke(tmp_path, monkeypatch):
+# Runs into a tmp cwd: main() writes results/ relative to the working
+# directory, so without this the smoke run would overwrite the real
+# evaluation results (which are committed) with 2-point quick data.
+    monkeypatch.chdir(tmp_path)
     main(quick=True, losses=[0, 20])
 
     with open("results/eval.csv") as f:
