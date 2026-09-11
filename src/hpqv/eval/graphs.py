@@ -48,3 +48,9 @@ def plot_loss_vs_fragments(rows, out_png):
 def plot_latency_vs_ttfb(rows, out_png):
     return _plot(rows, out_png, "delay_ms", "ttfb_ms",
                  "Delay (ms)", "TTFB (ms)", "TTFB vs delay")
+
+
+def plot_loss_vs_success(rows, out_png):
+    return _plot(rows, out_png, "loss_pct", "success_pct",
+                 "Packet loss (%)", "Handshake success (%)",
+                 "Handshake completion vs packet loss")
