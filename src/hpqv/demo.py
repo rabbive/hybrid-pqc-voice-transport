@@ -73,10 +73,19 @@ class FrameSource:
 
     def frames(self):
         if self.mode == "file":
+            # Pace the file at 20 ms/frame so a rehearsal behaves like a real
+            # call: packets spread over the wire instead of arriving as one
+            # burst, and the live status counter actually ticks. Without this a
+            # 3 s WAV finishes in well under a second.
+            next_frame = time.monotonic()
             while True:
                 pcm = self._wav.readframes(FRAME_SAMPLES)
                 if len(pcm) < FRAME_BYTES:
                     return
+                next_frame += FRAME_SAMPLES / FS
+                delay = next_frame - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
                 yield pcm
         else:
             deadline = time.monotonic() + self.seconds
