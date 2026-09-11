@@ -5,6 +5,26 @@ TCP, then Opus-encoded voice over UDP, both directions. Includes an application-
 packet-loss knob for showing the transport survive loss live (works on macOS,
 unlike `tc netem`).
 
+## GUI (recommended for the defense)
+
+```bash
+python -m hpqv.gui
+```
+
+A single window over the same call machinery as the CLI — same handshake, same
+transport, so you are demonstrating exactly what was measured.
+
+1. Pick the shared `identity.json` (the **…** button).
+2. Choose **Listen on port** on one machine, **Call** with `host:port` on the other.
+3. **Start.** The state line moves: listening → handshake → *connected — talk*.
+4. Talk. The level meters move, and the counters climb.
+5. **Drag the packet-loss slider mid-call.** This is the moment worth showing:
+   loss is injected live, without hanging up, so the audience hears the call
+   degrade and recover while the counters show dropped packets rising.
+6. **Hang up** when done.
+
+Requires no extra dependencies — tkinter ships with Python.
+
 ## 1. Generate a shared identity file
 
 Both peers need a shared identity file so each side can pin the other's public key.

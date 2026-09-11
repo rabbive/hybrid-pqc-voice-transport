@@ -108,6 +108,7 @@ class FrameSink:
         self.mode = mode
         self._frames = []
         self._stream = None
+        self._closed = False
         if mode == "speaker":
             try:
                 import sounddevice as sd
@@ -131,20 +132,32 @@ class FrameSink:
             raise ValueError(mode)
 
     def write(self, pcm: bytes):
+        if self._closed:
+            # Hanging up closes the sink while the receiver thread may still be
+            # draining; writing to a torn-down PortAudio stream throws and dumps
+            # a traceback over the demo. Dropping late frames is the right call.
+            return
         if self.mode == "speaker":
             # sounddevice needs a shaped int16 array, not raw bytes: handing it
             # bytes raises "dtype mismatch: 'bytesN' vs 'int16'" and kills
             # playback on the first frame.
             import numpy as np
-            self._stream.write(
-                np.frombuffer(pcm, dtype="<i2").reshape(-1, CHANNELS))
+            try:
+                self._stream.write(
+                    np.frombuffer(pcm, dtype="<i2").reshape(-1, CHANNELS))
+            except Exception:
+                pass          # device hiccup or shutdown: never kill the call
         else:
             self._frames.append(pcm)
 
     def close(self):
+        self._closed = True          # stop accepting writes before tearing down
         if self.mode == "speaker":
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
         else:
             with wave.open(self._wav_path, "wb") as w:
                 w.setnchannels(CHANNELS)
@@ -154,19 +167,61 @@ class FrameSink:
                     w.writeframes(pcm)
 
 
+class LossControl:
+    """Packet-drop percentage that can be changed while a call is running.
+
+    The sender reads this every frame, so the GUI slider (or any other
+    controller) takes effect mid-call instead of requiring a restart.
+    """
+
+    def __init__(self, pct: float = 0.0):
+        self._lock = threading.Lock()
+        self._pct = float(pct)
+
+    @property
+    def pct(self) -> float:
+        with self._lock:
+            return self._pct
+
+    @pct.setter
+    def pct(self, value: float) -> None:
+        with self._lock:
+            self._pct = max(0.0, min(100.0, float(value)))
+
+
 class Stats:
     def __init__(self):
         self.lock = threading.Lock()
         self.sent = 0
         self.received = 0
         self.dropped = 0
+        # Most recent frame energy each way, for the GUI level meters.
+        self.tx_level = 0.0
+        self.rx_level = 0.0
 
     def snapshot(self):
         with self.lock:
             return self.sent, self.received, self.dropped
 
+    def levels(self):
+        with self.lock:
+            return self.tx_level, self.rx_level
 
-def _sender_loop(udp_sock, dest, session, source, drop_pct, stats, stop_event):
+
+def _rms(pcm: bytes) -> float:
+    """Frame energy, 0.0-1.0, cheap enough to run per frame."""
+    if not pcm:
+        return 0.0
+    import array
+    samples = array.array("h")
+    samples.frombytes(pcm)
+    if not samples:
+        return 0.0
+    total = sum(float(x) * x for x in samples)
+    return min(1.0, (total / len(samples)) ** 0.5 / 32768.0)
+
+
+def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
     key, send_prefix, _recv_prefix = session
     codec = OpusCodec()
     seq = 0
@@ -174,6 +229,10 @@ def _sender_loop(udp_sock, dest, session, source, drop_pct, stats, stop_event):
         for pcm in source.frames():
             if stop_event.is_set():
                 break
+            level = _rms(pcm)
+            with stats.lock:
+                stats.tx_level = level
+            drop_pct = loss.pct          # re-read every frame: changeable mid-call
             if drop_pct > 0 and random.random() * 100 < drop_pct:
                 with stats.lock:
                     stats.dropped += 1
@@ -211,30 +270,37 @@ def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
             stats.received += 1
         frame = jb.pop()
         if frame is not None:
-            sink.write(codec.decode(frame))
+            pcm = codec.decode(frame)
+            with stats.lock:
+                stats.rx_level = _rms(pcm)
+            sink.write(pcm)
     for frame in jb.flush():
         sink.write(codec.decode(frame))
 
 
-def _status_loop(stats, drop_pct, stop_event):
+def _status_loop(stats, loss, stop_event):
     while not stop_event.is_set():
         sent, received, dropped = stats.snapshot()
-        print(f"\r[status] sent={sent} received={received} dropped={dropped} drop_pct={drop_pct}%   ",
+        print(f"\r[status] sent={sent} received={received} dropped={dropped} drop_pct={loss.pct}%   ",
               end="", flush=True)
         stop_event.wait(STATUS_INTERVAL)
     print()
 
 
-def _run_call(sock_tcp, udp_sock, dest, session, args):
+def _run_call(sock_tcp, udp_sock, dest, session, args,
+              stats=None, loss=None, stop_event=None):
+    """Run a call. The GUI passes in its own stats/loss/stop_event so it can
+    watch the counters and move the loss slider while the call is live."""
     source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
     sink = FrameSink(args.output, wav_path=args.out_wav)
-    stats = Stats()
-    stop_event = threading.Event()
+    stats = stats if stats is not None else Stats()
+    loss = loss if loss is not None else LossControl(args.drop_pct)
+    stop_event = stop_event if stop_event is not None else threading.Event()
 
-    if args.drop_pct > 0:
-        print(f"loss injection active: dropping {args.drop_pct}% of outgoing packets")
+    if loss.pct > 0:
+        print(f"loss injection active: dropping {loss.pct}% of outgoing packets")
 
-    status_thread = threading.Thread(target=_status_loop, args=(stats, args.drop_pct, stop_event))
+    status_thread = threading.Thread(target=_status_loop, args=(stats, loss, stop_event))
     recv_thread = threading.Thread(
         target=_receiver_loop,
         args=(udp_sock, session, sink, args.jitter_depth, stats, stop_event))
@@ -242,7 +308,7 @@ def _run_call(sock_tcp, udp_sock, dest, session, args):
     recv_thread.start()
 
     try:
-        _sender_loop(udp_sock, dest, session, source, args.drop_pct, stats, stop_event)
+        _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event)
         if args.input == "file":
             # let receiver drain remaining in-flight datagrams
             time.sleep(0.5)
