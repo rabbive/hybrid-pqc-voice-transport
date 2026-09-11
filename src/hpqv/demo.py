@@ -132,7 +132,12 @@ class FrameSink:
 
     def write(self, pcm: bytes):
         if self.mode == "speaker":
-            self._stream.write(pcm)
+            # sounddevice needs a shaped int16 array, not raw bytes: handing it
+            # bytes raises "dtype mismatch: 'bytesN' vs 'int16'" and kills
+            # playback on the first frame.
+            import numpy as np
+            self._stream.write(
+                np.frombuffer(pcm, dtype="<i2").reshape(-1, CHANNELS))
         else:
             self._frames.append(pcm)
 
