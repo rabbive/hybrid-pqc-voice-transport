@@ -42,33 +42,30 @@ fragments survives with probability `(1-p)^n`. For n = 8 that decays brutally.
 
 ## Results
 
-| Packet loss | naive success | theory `(1-p)^8` | hybrid success | hybrid median time |
+<!-- BEGIN GENERATED: survival -->
+| packet loss | naive success (95% CI) | theory `(1-p)^8` | hybrid success (95% CI) | hybrid median time |
 |---|---|---|---|---|
-| 0 % | 100 % | 100 % | 100 % | 0.1 ms |
-| 5 % | 75 % | 66 % | 100 % | 0.2 ms |
-| 10 % | 39 % | 43 % | 100 % | 0.3 ms |
-| 20 % | **19 %** | 17 % | **99 %** | 421 ms |
-| 30 % | **2 %** | 6 % | **83 %** | 1020 ms |
-
-(Numbers above are `results/handshake_survival.csv`, committed alongside this
-document. Independent repetitions move each point by a few percent — a previous
-run measured naive at 16 % / 10 % for 20 % / 30 % loss. The shape and the
-conclusion are stable; the individual cells are samples, not constants.)
+| 0 % | **100 %** (96–100) | 100 % | **100 %** (96–100) | 0.1 ms |
+| 5 % | **75 %** (66–82) | 66 % | **100 %** (96–100) | 0.2 ms |
+| 10 % | **39 %** (30–49) | 43 % | **100 %** (96–100) | 0.3 ms |
+| 20 % | **19 %** (13–28) | 17 % | **99 %** (95–100) | 420.8 ms |
+| 30 % | **2 %** (1–7) | 6 % | **83 %** (74–89) | 1019.6 ms |
+<!-- END GENERATED: survival -->
 
 ![handshake survival](../results/handshake_survival.png)
 
 ## What this shows
 
-1. **The naive design collapses.** At 20 % loss only **19 of 100** calls connect — roughly
-   *one in five*. At 30 % it is **2 in 100**. This is not degraded quality; it is **failure to
+1. **The naive design collapses.** Past 10 % loss only a small minority of calls connect at all,
+   and by 30 % it is a handful in a hundred. This is not degraded quality; it is **failure to
    establish the call at all**.
-2. **The hybrid design survives.** 99 % at 20 % loss and 83 % at 30 %, because nothing fragments
-   and TCP retransmits what is lost.
+2. **The hybrid design survives.** It completes essentially every handshake up to 20 % loss,
+   because nothing fragments and TCP retransmits what is lost.
 3. **The hybrid pays in time, not failure** — the honest trade. Its median handshake is
-   sub-millisecond to 10 % loss, then rises to ~0.42 s at 20 % and ~1.02 s at 30 % as TCP's
-   retransmission backoff kicks in. A slow connect is recoverable; a failed connect is not.
-   Note the hybrid is not immune either: at 30 % loss 17 % of its handshakes still fail within
-   the 20 s budget. The claim is a large margin, not invulnerability.
+   sub-millisecond on a good link, then climbs into the hundreds of milliseconds and past a
+   second as TCP's retransmission backoff kicks in. A slow connect is recoverable; a failed
+   connect is not. The hybrid is not immune either: at the highest loss level a fraction of its
+   handshakes still fail inside the 20 s budget — a large margin, not invulnerability.
 4. **Measurement matches theory.** The observed curve tracks `(1-p)^8` closely, which confirms
    the mechanism really is fragment-loss amplification rather than some artefact of our setup.
 
