@@ -50,7 +50,8 @@ Full numbers, method and honest limitations: **[docs/EVALUATION-REPORT.md](docs/
 
 ```bash
 uv sync                       # Python 3.11, pinned
-uv run pytest -q              # 36 pass on macOS; 15 container-only tests skip
+uv run pytest -q              # 38 pass on macOS; 15 container-only tests skip
+                              # all 53 pass in the evaluation container (below)
 ```
 
 macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib (see
@@ -58,15 +59,35 @@ macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib (see
 
 ## Run a real call
 
+Generate one identity file and copy it to both machines — each peer pins the
+other's public key, so both must load the same file:
+
 ```bash
-python -m hpqv.demo keygen --out identity.json   # copy to both machines
+python -m hpqv.demo keygen --out identity.json
+```
+
+**GUI** (recommended for a live audience — no extra dependency, tkinter is stdlib):
+
+```bash
+python -m hpqv.gui
+```
+
+Pick the identity file, choose *Listen* on one machine and *Call* on the other,
+press Start. Then **drag the packet-loss slider during the call**: loss is
+injected live, so the audience hears the transport degrade and recover while the
+dropped counter climbs — no hanging up.
+
+**CLI**, same machinery:
+
+```bash
 python -m hpqv.demo listen --port 9000 --identity-file identity.json
 python -m hpqv.demo call 192.168.1.42:9000 --identity-file identity.json
 ```
 
-Add `--drop-pct 30` mid-call to demonstrate the transport under loss. Use two
-machines — on one box the mic picks up the speaker and howls. Full instructions
-and troubleshooting: **[docs/DEMO.md](docs/DEMO.md)**.
+`--drop-pct 30` injects loss, fixed for the duration of the call.
+
+Use two machines — on one box the mic picks up the speaker and howls. Full
+instructions and troubleshooting: **[docs/DEMO.md](docs/DEMO.md)**.
 
 ## Reproduce every figure
 
@@ -85,7 +106,7 @@ Outputs land in `results/` (committed, so the report can cite exact numbers).
 ## Layout
 
 ```
-src/hpqv/          handshake, control, packet, jitter, audio, udp, call, session, demo
+src/hpqv/          handshake, control, packet, jitter, audio, udp, call, session, demo, gui
 src/hpqv/eval/     MOS (ITU-T G.107), capture, stats, baselines, netem, runner, graphs
 ns3/               hpqv_sim.cc — the NS-3 secondary model (see ns3/README.md)
 eval/Dockerfile    the Linux evaluation environment
@@ -102,7 +123,8 @@ docs/              evaluation report, experiments, wire format, ADRs
 | [docs/EXPERIMENT-handshake-survival.md](docs/EXPERIMENT-handshake-survival.md) | Does the handshake survive loss? |
 | [docs/EXPERIMENT-fec-recovery.md](docs/EXPERIMENT-fec-recovery.md) | Does Opus in-band FEC actually recover frames? |
 | [docs/wire-format.md](docs/wire-format.md) | Byte layout of the handshake and voice datagrams |
-| [docs/DEMO.md](docs/DEMO.md) | Running the live call |
+| [docs/DEMO.md](docs/DEMO.md) | Running the live call (GUI and CLI) |
+| [docs/REPORT.md](docs/REPORT.md) | IEEE-structured project report |
 | [docs/adr/](docs/adr/) | Why NS-3 is secondary, why mutual auth was added, etc. |
 
 ## Status and limitations
@@ -115,3 +137,8 @@ baseline *further*), and the NS-3 model understates TCP's head-of-line latency.
 
 This is a final-year academic project, not production software: it has not been
 security-audited, and identities are pinned out-of-band rather than via a CA.
+
+Remaining work is tracked in
+[GitHub issues](https://github.com/rabbive/hybrid-pqc-voice-transport/issues) —
+including a two-device dry-run, the report sections still to be written, and the
+deferred future-work items.
