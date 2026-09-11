@@ -19,7 +19,8 @@ from hpqv.eval.stats import wilson_ci
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 RESULTS = os.path.join(ROOT, "results")
 DOCS = [os.path.join(ROOT, "docs", "EVALUATION-REPORT.md"),
-        os.path.join(ROOT, "docs", "EXPERIMENT-handshake-survival.md")]
+        os.path.join(ROOT, "docs", "EXPERIMENT-handshake-survival.md"),
+        os.path.join(ROOT, "docs", "REPORT.md")]
 
 BEGIN = "<!-- BEGIN GENERATED: {} -->"
 END = "<!-- END GENERATED: {} -->"
@@ -105,7 +106,20 @@ def survival():
                    "hybrid success (95% CI)", "hybrid median time"], body)
 
 
+def fec_recovery():
+    rows = sorted(_read("fec_recovery.csv"), key=lambda r: r["loss_pct"])
+    body = []
+    for r in rows:
+        def fmt(v):
+            return "99.0 dB (cap)" if v >= 99.0 else "{:.1f} dB".format(v)
+        body.append("| {:.0f} % | {} | {} | {:.0f} | {:.0f} |".format(
+            r["loss_pct"], fmt(r["snr_fec_on_db"]), fmt(r["snr_fec_off_db"]),
+            r["frames_lost"], r["frames_recovered_by_fec"]))
+    return _table(["loss", "FEC on", "FEC off", "frames lost", "recovered by FEC"], body)
+
+
 TABLES = {
+    "fec-recovery": fec_recovery,
     "track2-loss": track2_loss,
     "track2-latency": track2_latency,
     "ns3-loss": ns3_loss,
