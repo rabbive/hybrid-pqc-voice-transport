@@ -15,15 +15,20 @@ from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS
 STATUS_INTERVAL = 1.0
 
 
-def keygen(args):
+def create_identity(path):
+    """Save fresh demo keys, refusing to overwrite an existing identity."""
     a_pub, a_secret = h.make_identity()
     b_pub, b_secret = h.make_identity()
     identity = {
         "listener": {"sig_pub": a_pub.hex(), "sig_secret": a_secret.hex()},
         "caller": {"sig_pub": b_pub.hex(), "sig_secret": b_secret.hex()},
     }
-    with open(args.out, "w") as f:
+    with open(path, "x", encoding="utf-8") as f:
         json.dump(identity, f)
+
+
+def keygen(args):
+    create_identity(args.out)
     print(f"wrote identity file: {args.out}")
     print("both listener and caller must use the same --identity-file")
 
@@ -334,7 +339,7 @@ def listen(args):
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("0.0.0.0", args.port))
     srv.listen(1)
-    print(f"listening on port {args.port}, fingerprint {sig_pub[:8].hex()}...")
+    print(f"listening on port {args.port}, fingerprint {sig_pub[:8].hex()}...", flush=True)
     conn, addr = srv.accept()
     print(f"connection from {addr}")
 

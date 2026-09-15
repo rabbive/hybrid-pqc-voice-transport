@@ -1,2 +1,3 @@
 def main() -> None:
-    print("Hello from hpqv!")
+    from hpqv.demo import main as demo_main
+    demo_main()

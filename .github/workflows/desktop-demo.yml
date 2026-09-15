@@ -1,0 +1,87 @@
+name: Desktop demo
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["feat/desktop-demo-packages"]
+  pull_request:
+    paths:
+      - "src/**"
+      - "packaging/**"
+      - "scripts/smoke_package.py"
+      - "tests/**"
+      - "docs/DESKTOP-DEMO.md"
+      - ".github/workflows/desktop-demo.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  # Expressions below use only this file's static matrix, never event text in shell code.
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-2022
+            architecture: x64
+            artifact: HPQV-windows-x64
+          - os: macos-15
+            architecture: arm64
+            artifact: HPQV-macos-arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          architecture: ${{ matrix.architecture }}
+      - name: Install build dependencies
+        run: |
+          python -m pip install -r packaging/requirements.txt
+          python -m pip install --no-deps .
+      - name: Build native libraries
+        run: python packaging/build.py --native-only
+      - name: Configure source-test library lookup
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          prefix = Path(".build/native").resolve()
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"OQS_INSTALL_PATH={prefix}\n")
+              if os.name != "nt":
+                  f.write(f"DYLD_FALLBACK_LIBRARY_PATH={prefix / 'lib'}\n")
+          with open(os.environ["GITHUB_PATH"], "a") as f:
+              f.write(str(prefix / "bin") + "\n")
+      - name: Test transport and identity
+        run: python -m pytest tests/test_demo_identity.py tests/test_handshake.py tests/test_control.py tests/test_packet.py tests/test_audio.py tests/test_call.py tests/test_session.py tests/test_jitter.py tests/test_loss_control.py -q
+      - name: Freeze and archive
+        run: python packaging/build.py --skip-native
+      - name: Extract and test the shipped CLI
+        shell: python
+        run: |
+          from pathlib import Path
+          import os
+          import shutil
+          import subprocess
+          import sys
+          target = "windows-x64" if os.name == "nt" else "macos-arm64"
+          archive = Path(f"dist/HPQV-{target}.zip").resolve()
+          destination = Path(".build/extracted package").resolve()
+          destination.mkdir(parents=True, exist_ok=True)
+          if os.name == "nt":
+              shutil.unpack_archive(archive, destination)
+          else:
+              subprocess.run(["ditto", "-x", "-k", str(archive), str(destination)], check=True)
+          executable = destination / f"HPQV-{target}" / "hpqv-cli" / ("hpqv-cli.exe" if os.name == "nt" else "hpqv-cli")
+          subprocess.run([sys.executable, "scripts/smoke_package.py", str(executable)], check=True)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: |
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 14

@@ -16,7 +16,7 @@ import socket
 import struct
 import threading
 import tkinter as tk
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 
 from hpqv import control, demo
 
@@ -27,14 +27,14 @@ class DemoWindow:
     def __init__(self, root):
         self.root = root
         root.title("hpqv — post-quantum voice demo")
-        root.geometry("460x430")
+        root.geometry("540x470")
 
         self.stats = demo.Stats()
         self.loss = demo.LossControl(0.0)
         self.stop_event = threading.Event()
         self.events = queue.Queue()        # worker -> UI messages
         self.worker = None
-        self.identity_path = tk.StringVar(value="identity.json")
+        self.identity_path = tk.StringVar(value="")
         self.mode = tk.StringVar(value="listen")
         self.port = tk.StringVar(value="9000")
         self.target = tk.StringVar(value="192.168.1.42:9000")
@@ -63,6 +63,9 @@ class DemoWindow:
         ttk.Label(ident, text="Identity:").pack(side="left")
         ttk.Entry(ident, textvariable=self.identity_path, width=24).pack(side="left", padx=4)
         ttk.Button(ident, text="…", width=3, command=self._pick_identity).pack(side="left")
+        ttk.Button(ident, text="Create identity", command=self._create_identity).pack(side="left", padx=4)
+        ttk.Label(conn, text="Create once, then privately copy the identity file to your other computer.").grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=4)
 
         btns = ttk.Frame(self.root)
         btns.pack(fill="x", **pad)
@@ -107,6 +110,22 @@ class DemoWindow:
             self.identity_path.set(path)
 
     # ---------------- call control ----------------
+
+    def _create_identity(self):
+        path = filedialog.asksaveasfilename(
+            title="Save a new demo identity", initialfile="identity.json",
+            defaultextension=".json", filetypes=[("JSON", "*.json")])
+        if not path:
+            return
+        try:
+            demo.create_identity(path)
+        except FileExistsError:
+            messagebox.showerror("Identity already exists", "Choose a new filename to preserve your existing keys.")
+        except Exception as exc:
+            messagebox.showerror("Could not create identity", str(exc))
+        else:
+            self.identity_path.set(path)
+            self.state_label.config(text="identity saved; copy it privately to your other computer")
 
     def _on_loss(self, value):
         pct = float(value)

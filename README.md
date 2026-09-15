@@ -59,6 +59,9 @@ macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib (see
 
 ## Run a real call
 
+For Windows and Apple Silicon app packages, see [Desktop demo setup](docs/DESKTOP-DEMO.md).
+The portable builds include a GUI and CLI and need no separate Python installation.
+
 Generate one identity file and copy it to both machines — each peer pins the
 other's public key, so both must load the same file:
 
