@@ -35,3 +35,6 @@ if sys.stdout is None:
 if sys.stderr is None:
     sys.stderr = open(os.devnull, "w")
 
+# Import initializes bundled PortAudio without opening a microphone or speaker.
+# The file-only smoke check therefore catches a missing audio-device library too.
+import sounddevice

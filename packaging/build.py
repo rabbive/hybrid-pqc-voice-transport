@@ -9,6 +9,8 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / ".build"
@@ -91,9 +93,12 @@ def main():
     licenses.mkdir()
     for name in SOURCES:
         source = WORK / "sources" / name
-        for license_name in ("LICENSE", "COPYING"):
-            if (source / license_name).exists():
-                shutil.copy2(source / license_name, licenses / f"{name}-{license_name}")
+        # Include upstream module licenses as well as each library's main license.
+        for license_file in source.rglob("*"):
+            if license_file.is_file() and license_file.name.upper().startswith(("LICENSE", "COPYING")):
+                dest = licenses / name / license_file.relative_to(source)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(license_file, dest)
     for distribution in importlib.metadata.distributions():
         for file in distribution.files or []:
             if any(word in str(file).lower() for word in ("license", "copying")):
@@ -102,10 +107,17 @@ def main():
                     dest = licenses / distribution.metadata["Name"] / file
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(source, dest)
-    for candidate in (Path(sys.base_prefix) / "LICENSE.txt", Path(sys.base_prefix) / "LICENSE"):
+    for candidate in (Path(sys.base_prefix) / "LICENSE.txt", Path(sys.base_prefix) / "LICENSE",
+                      Path(sysconfig.get_path("stdlib")) / "LICENSE.txt"):
         if candidate.is_file():
             shutil.copy2(candidate, licenses / "Python-LICENSE.txt")
             break
+    else:
+        version = platform.python_version()
+        with urllib.request.urlopen(
+            f"https://raw.githubusercontent.com/python/cpython/v{version}/LICENSE", timeout=30
+        ) as response:
+            (licenses / "Python-LICENSE.txt").write_bytes(response.read())
     versions = {name: importlib.metadata.version(name) for name in
                 ("cryptography", "liboqs-python", "numpy", "opuslib", "sounddevice", "pyinstaller")}
     (stage / "BUILD-INFO.json").write_text(json.dumps({

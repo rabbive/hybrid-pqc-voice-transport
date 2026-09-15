@@ -19,6 +19,10 @@ def smoke(executable):
     executable = Path(executable).resolve()
     if not executable.is_file():
         raise RuntimeError(f"Packaged executable missing: {executable}")
+    package = executable.parent.parent
+    for license_path in ("liboqs/LICENSE.txt", "opus/COPYING", "Python-LICENSE.txt"):
+        if not (package / "licenses" / license_path).is_file():
+            raise RuntimeError(f"Missing runtime license: {license_path}")
     env = os.environ.copy()
     for key in ("OQS_INSTALL_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
                 "PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH"):
@@ -90,4 +94,3 @@ def smoke(executable):
 
 if __name__ == "__main__":
     smoke(sys.argv[1])
-
