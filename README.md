@@ -46,6 +46,16 @@ Measurements track the `(1-p)^8` fragment-loss prediction, confirming the mechan
 
 Full numbers, method and honest limitations: **[docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md)**.
 
+## Download the desktop demo
+
+**[HPQV v0.1.0 Demo 1](https://github.com/rabbive/hybrid-pqc-voice-transport/releases/tag/v0.1.0-demo.1)** — portable apps with GUI and CLI; no separate Python installation needed.
+
+- [Windows x64 ZIP](https://github.com/rabbive/hybrid-pqc-voice-transport/releases/download/v0.1.0-demo.1/HPQV-windows-x64.zip)
+- [Apple Silicon Mac ZIP](https://github.com/rabbive/hybrid-pqc-voice-transport/releases/download/v0.1.0-demo.1/HPQV-macos-arm64.zip)
+- [Setup and troubleshooting guide](https://github.com/rabbive/hybrid-pqc-voice-transport/releases/download/v0.1.0-demo.1/START-HERE.md)
+
+Extract the entire ZIP and open HPQV. Use two computers on the same LAN, create one identity file, privately copy it to the other computer, then choose Listen on one and Call its local IP on the other. Development builds may show OS security prompts; see the guide. SHA-256 checksums are attached to the release.
+
 ## Quick start
 
 ```bash
