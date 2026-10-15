@@ -1,4 +1,5 @@
 """Window smoke tests: build the real DemoWindow, no network, no audio."""
+import gc
 import os
 import subprocess
 import sys
@@ -40,6 +41,12 @@ def root(tk_ok):
     r.withdraw()
     yield r
     r.destroy()
+    # DemoWindow holds Tk Variables in reference cycles. Collect them here, on
+    # the main thread: if a later test's worker thread happens to run the GC,
+    # Variable.__del__ calls into Tcl from the wrong thread and Tcl aborts the
+    # whole process at exit ("Tcl_AsyncDelete: async handler deleted by the
+    # wrong thread").
+    gc.collect()
 
 
 def test_window_builds_and_destroys(root):
