@@ -10,8 +10,17 @@ import threading
 from hpqv import handshake as h
 from hpqv.controls import CallControls
 from hpqv.demo import Stats, _sender_loop
+from hpqv.impair import DelayLine
 
 FRAME = b"\x00\x01" * 960          # one 20 ms frame of PCM
+
+
+def test_delay_line_can_drain_pending_packets_on_close():
+    delivered = []
+    line = DelayLine(delivered.append, seed=1)
+    line.send("last packet", delay_ms=10)
+    line.close(drain=True)
+    assert delivered == ["last packet"]
 
 
 class _Source:
