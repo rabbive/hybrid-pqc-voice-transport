@@ -1,7 +1,6 @@
 """Citable, seeded loopback measurements through the live call path."""
 import argparse
 import hashlib
-import shutil
 import socket
 import tempfile
 import threading
@@ -21,17 +20,6 @@ from hpqv.telemetry import Telemetry
 RESULTS_DIR = Path("results/live_scenarios")
 
 
-class _DirectionalStats:
-    """Pair one impaired sender with its corresponding receiver counters."""
-
-    def __init__(self, sent, received):
-        self.sent, self.received = sent, received
-
-    def as_dict(self):
-        tx, rx = self.sent.as_dict(), self.received.as_dict()
-        return {**rx, "sent": tx["sent"], "dropped": tx["dropped"]}
-
-
 def make_speech_wav(path, seconds=10.0):
     """Create deterministic harmonic speech-like PCM for repeatable headless runs."""
     n = int(FS * seconds)
@@ -47,6 +35,20 @@ def make_speech_wav(path, seconds=10.0):
         out.setframerate(FS)
         out.writeframes(pcm.tobytes())
     return Path(path)
+
+
+def lbrr_coverage(path):
+    """(packets carrying LBRR, packets) for the sender's default FEC encoder.
+
+    FEC can only rebuild a lost frame when the NEXT packet carries LBRR, and
+    libopus decides per frame whether to include it, so this bounds recovery.
+    """
+    from hpqv.audio import OpusCodec
+    from hpqv.playout import packet_has_lbrr
+    codec, pcm = OpusCodec(fec=True), _read_pcm(path).tobytes()
+    step = 2 * FRAME_SAMPLES
+    packets = [codec.encode(pcm[i:i + step]) for i in range(0, len(pcm) - step + 1, step)]
+    return sum(packet_has_lbrr(p, True) for p in packets), len(packets)
 
 
 def _duration_wav(source, destination, seconds):
@@ -114,18 +116,12 @@ def _run_loopback(source, received_path, knobs, seed):
             kwargs={"stats": stats, "controls": controls, "stop_event": stop_events[role],
                     "call_handle": handle, "rng_seed": seed + seed_offset, "quiet": True})
         peers[role] = (handle, thread)
+    # Telemetry is receiver-side: the listener measures the caller's impaired stream.
+    telemetry = Telemetry(listener_stats, listener_controls)
+    start = time.monotonic()
     try:
         for _handle, thread in peers.values():
             thread.start()
-        combined = _DirectionalStats(caller_stats, listener_stats)
-        telemetry_controls = CallControls(
-            delay_ms=knobs.get("delay_ms", 0), jitter_ms=knobs.get("jitter_ms", 0),
-            loss_pct=knobs.get("loss_pct", 0), loss_model=knobs.get("loss_model", "random"),
-            burst_len=knobs.get("burst_len", 3),
-            incoming_loss_pct=knobs.get("incoming_loss_pct", 0),
-            repair=repair, fec=fec, jitter_depth=knobs.get("jitter_depth", 3))
-        telemetry = Telemetry(combined, telemetry_controls)
-        start = time.monotonic()
         next_sample = start + 1
         while any(thread.is_alive() for _handle, thread in peers.values()):
             now = time.monotonic()
@@ -133,9 +129,7 @@ def _run_loopback(source, received_path, knobs, seed):
                 telemetry.sample(now - start)
                 next_sample += 1
             time.sleep(min(0.02, max(0, next_sample - time.monotonic())))
-        elapsed = time.monotonic() - start
-        if not telemetry.rows:
-            telemetry.sample(elapsed)
+        telemetry.sample(time.monotonic() - start)   # tail since the last whole second
         return caller_stats, listener_stats, telemetry
     finally:
         for stop in stop_events.values():
@@ -214,9 +208,9 @@ def run_scenario(name: str, knobs: dict, seconds: float, wav_path=None, seed: in
         source = Path(tmp) / "source.wav"
         _duration_wav(wav_path, source, seconds)
         sender, receiver, telemetry = _run_loopback(source, received_path, knobs, seed)
-        if name == "clean" and not knobs:
-            shutil.copyfile(received_path, reference_path)
-        elif not reference_path.exists():
+        # Always a separate call, so even the clean row is scored against an
+        # independent decode rather than against itself.
+        if not reference_path.exists():
             _run_loopback(source, reference_path, codec, seed)
         reference, reconstructed = _read_pcm(reference_path), _read_pcm(received_path)
         aligned_ref, aligned_out, offset, _ref_start, out_start = _align_frames(
@@ -225,17 +219,27 @@ def run_scenario(name: str, knobs: dict, seconds: float, wav_path=None, seed: in
         repaired_snr = _repaired_frame_snr_db(
             aligned_ref, aligned_out, receiver.repaired_sequences,
             receiver.first_played_seq, out_start)
-        mean_mos = float(np.mean([row["mos"] for row in telemetry.rows]))
+        rows = telemetry.rows
+        weights = [row["interval_expected"] for row in rows]
+        # Weighted by frames so a near-empty tail interval cannot swing the mean.
+        mean_mos = float(np.average([row["mos"] for row in rows], weights=weights)
+                         if sum(weights) else rows[-1]["mos"])
+        mean_added_delay = float(np.average([row["added_delay_ms"] for row in rows],
+                                            weights=weights) if sum(weights) else 0.0)
+    # Same definitions as Telemetry; frames_offered is the sender's ground truth.
     offered = sender.sent + sender.dropped
+    expected = receiver.rx_expected
     delivered = max(0, receiver.received - receiver.incoming_dropped)
-    lost = max(0, offered - delivered + receiver.late)
+    lost = max(0, expected - delivered + receiver.late)
     residual = max(0, lost - receiver.recovered)
     return {
         "name": name, "knobs": dict(knobs), "frames_offered": offered,
+        "frames_expected": expected,
         "frames_delivered": delivered, "frames_lost": lost, "frames_late": receiver.late,
         "frames_recovered": receiver.recovered, "frames_concealed": receiver.concealed,
-        "measured_loss_pct": 100 * max(0, offered - delivered) / offered if offered else 0.0,
-        "residual_loss_pct": 100 * residual / offered if offered else 0.0,
+        "measured_loss_pct": 100 * max(0, expected - delivered) / expected if expected else 0.0,
+        "residual_loss_pct": 100 * residual / expected if expected else 0.0,
+        "rx_jitter_ms": receiver.rx_jitter_ms, "mean_added_delay_ms": mean_added_delay,
         "mean_mos": mean_mos, "whole_signal_snr_db": whole_snr,
         "repaired_frame_snr_db": repaired_snr, "alignment_offset_frames": offset,
         "received_wav": str(received_path),

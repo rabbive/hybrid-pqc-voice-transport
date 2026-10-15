@@ -278,6 +278,7 @@ class RxMeter:
     def __init__(self, stats):
         self._stats = stats
         self._top = None             # highest seq seen
+        self._low = None             # lowest seq seen: jitter can reorder the first ones
         self._t0 = None              # first packet's transit: the zero point
         self._last = None            # previous packet's relative transit
 
@@ -288,9 +289,15 @@ class RxMeter:
         transit -= self._t0
         s = self._stats
         with s.lock:
-            if self._top is None or seq > self._top:
-                s.rx_expected += 1 if self._top is None else seq - self._top
+            if self._top is None:
+                s.rx_expected += 1
+                self._top = self._low = seq
+            elif seq > self._top:
+                s.rx_expected += seq - self._top
                 self._top = seq
+            elif seq < self._low:
+                s.rx_expected += self._low - seq
+                self._low = seq
             if self._last is not None:
                 s.rx_jitter_ms += (abs(transit - self._last) - s.rx_jitter_ms) / 16
             self._last = transit

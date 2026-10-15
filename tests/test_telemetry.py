@@ -88,6 +88,16 @@ def test_rates_use_the_real_sample_spacing():
     assert row["recovered_per_s"] == pytest.approx(6 / 1.2)
 
 
+def test_rx_meter_counts_seqs_older_than_the_first_arrival():
+    """Jitter can deliver seq 1 before seq 0; the span must still cover seq 0."""
+    stats = Stats()
+    from hpqv.demo import RxMeter
+    meter = RxMeter(stats)
+    for seq, now in ((1, 10.000), (0, 10.010), (2, 10.040)):
+        meter.arrive(seq, now)
+    assert stats.rx_expected == 3
+
+
 def test_rx_meter_tracks_seq_span_rfc3550_jitter_and_relative_transit():
     stats = Stats()
     from hpqv.demo import RxMeter

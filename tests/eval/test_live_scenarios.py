@@ -39,3 +39,10 @@ def test_live_loopback_clean_and_fec_repair(tmp_path, monkeypatch):
     assert plc["repaired_frame_snr_db"] is not None
     assert delay["frames_late"] == 0
     assert delay["whole_signal_snr_db"] >= 60
+
+
+def test_lbrr_coverage_counts_encoded_packets(tmp_path):
+    wav = live_scenarios.make_speech_wav(tmp_path / "s.wav", seconds=1.0)
+    with_lbrr, packets = live_scenarios.lbrr_coverage(wav)
+    assert packets == 50
+    assert 0 < with_lbrr <= packets
