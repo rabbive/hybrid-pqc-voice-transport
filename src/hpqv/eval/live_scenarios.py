@@ -1,5 +1,4 @@
 """Citable, seeded loopback measurements through the live call path."""
-import argparse
 import hashlib
 import socket
 import tempfile
@@ -107,9 +106,8 @@ def _run_loopback(source, received_path, knobs, seed):
         ("listener", listener_tcp, "caller", listener_session, listener_stats,
          listener_controls, 10),
     ):
-        args = argparse.Namespace(input="file", wav=str(source), seconds=0, output="file",
-                                  out_wav=str(received_path if role == "listener" else return_path),
-                                  record_wav=None)
+        args = demo.call_args(input="file", wav=str(source), seconds=0, output="file",
+                              out_wav=str(received_path if role == "listener" else return_path))
         handle = CallHandle()
         thread = threading.Thread(target=demo._run_call, args=(
             tcp, udp[role], udp[other].getsockname(), session, args),
