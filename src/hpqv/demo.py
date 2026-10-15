@@ -108,13 +108,24 @@ class FrameSource:
 
 
 class FrameSink:
-    """Consumes decoded PCM frames, either to a speaker or a WAV file."""
+    """Consumes decoded PCM frames, either to a speaker or a WAV file.
 
-    def __init__(self, mode, wav_path=None):
+    `record_path` additionally tees every frame to a WAV, streamed to disk so a
+    long call does not sit in memory.
+    """
+
+    def __init__(self, mode, wav_path=None, record_path=None):
         self.mode = mode
         self._frames = []
         self._stream = None
         self._closed = False
+        self._rec = None
+        self._rec_lock = threading.Lock()    # write vs close race on hang-up
+        if record_path:
+            self._rec = wave.open(record_path, "wb")
+            self._rec.setnchannels(CHANNELS)
+            self._rec.setsampwidth(2)
+            self._rec.setframerate(FS)
         if mode == "speaker":
             try:
                 import sounddevice as sd
@@ -143,6 +154,10 @@ class FrameSink:
             # draining; writing to a torn-down PortAudio stream throws and dumps
             # a traceback over the demo. Dropping late frames is the right call.
             return
+        if self._rec is not None:
+            with self._rec_lock:
+                if self._rec is not None:
+                    self._rec.writeframes(pcm)
         if self.mode == "speaker":
             # sounddevice needs a shaped int16 array, not raw bytes: handing it
             # bytes raises "dtype mismatch: 'bytesN' vs 'int16'" and kills
@@ -158,6 +173,10 @@ class FrameSink:
 
     def close(self):
         self._closed = True          # stop accepting writes before tearing down
+        with self._rec_lock:
+            if self._rec is not None:
+                self._rec.close()
+                self._rec = None
         if self.mode == "speaker":
             try:
                 self._stream.stop()
@@ -333,6 +352,62 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     print(f"call ended: sent={sent} received={received} dropped={dropped} recovered={recovered}")
 
 
+class _CountingSocket:
+    """Counts payload bytes through control.send/recv_record and when data first arrived."""
+
+    def __init__(self, sock):
+        self._sock = sock
+        self.nbytes = 0
+        self.first_rx = None
+
+    def sendall(self, data):
+        self.nbytes += len(data)
+        self._sock.sendall(data)
+
+    def recv(self, n):
+        data = self._sock.recv(n)
+        if data and self.first_rx is None:
+            self.first_rx = time.perf_counter()
+        self.nbytes += len(data)
+        return data
+
+
+_RECORD_HEADER = 4       # control.send_record's length prefix; not handshake payload
+
+
+def timed_handshake(role, sock, sig_pub, sig_secret, peer_sig_pub, stats):
+    """Run the handshake and record its cost in stats (shared by CLI and GUI).
+
+    The initiator's clock starts at the call, so HELLO key generation and signing
+    count. The responder idles in accept/recv until the caller speaks, so its
+    clock starts when the first HELLO byte arrives rather than at connect time.
+    """
+    run = {"initiator": control.run_initiator, "responder": control.run_responder}[role]
+    counted = _CountingSocket(sock)
+    t0 = time.perf_counter()
+    session = run(counted, sig_pub, sig_secret, peer_sig_pub)
+    t1 = time.perf_counter()
+    if role == "responder" and counted.first_rx is not None:
+        t0 = counted.first_rx
+    with stats.lock:
+        stats.handshake_ms = (t1 - t0) * 1000.0
+        stats.handshake_bytes = counted.nbytes - 2 * _RECORD_HEADER   # HELLO + ACCEPT
+    return session
+
+
+def handshake_info() -> dict:
+    """Static facts about the handshake for the GUI's handshake panel."""
+    import oqs
+    sig_len = oqs.Signature(h.SIG_ALG).details["length_signature"]
+    ct_len = oqs.KeyEncapsulation(h.KEM_ALG).details["length_ciphertext"]
+    hello = 1 + h.KEM_PUB_LEN + h.SIG_PUB_LEN + sig_len
+    accept = 1 + ct_len + sig_len
+    return {"kem": h.KEM_ALG, "sig": h.SIG_ALG, "hello_bytes": hello,
+            "accept_bytes": accept, "total_bytes": hello + accept,
+            "transport": "TCP",   # too big for one UDP datagram, so it never touches UDP
+            "udp_fragments": 0, "datagram_cap": packet.MAX_DATAGRAM}
+
+
 def listen(args):
     if not args.identity_file:
         raise RuntimeError(
@@ -348,14 +423,15 @@ def listen(args):
     conn, addr = srv.accept()
     print(f"connection from {addr}")
 
-    session = control.run_responder(conn, sig_pub, sig_secret, peer_sig_pub)
-    print("handshake complete")
+    stats = Stats()
+    session = timed_handshake("responder", conn, sig_pub, sig_secret, peer_sig_pub, stats)
+    print(f"handshake complete ({stats.handshake_ms:.1f} ms, {stats.handshake_bytes} B)")
 
     udp_sock = _open_bound_udp(args.port)
     _msg_type, payload = control.recv_control(conn)
     (caller_udp_port,) = struct.unpack(">H", payload)
     peer_udp = (addr[0], caller_udp_port)
-    _run_call(conn, udp_sock, peer_udp, session, args)
+    _run_call(conn, udp_sock, peer_udp, session, args, stats=stats)
     conn.close()
 
 
@@ -373,14 +449,15 @@ def call(args):
     sock_tcp.connect((host, port))
     print(f"connected to {host}:{port}")
 
-    session = control.run_initiator(sock_tcp, sig_pub, sig_secret, peer_sig_pub)
-    print("handshake complete")
+    stats = Stats()
+    session = timed_handshake("initiator", sock_tcp, sig_pub, sig_secret, peer_sig_pub, stats)
+    print(f"handshake complete ({stats.handshake_ms:.1f} ms, {stats.handshake_bytes} B)")
 
     udp_sock = _open_bound_udp(0)
     udp_port = udp_sock.getsockname()[1]
     control.send_control(sock_tcp, control.MSG_CALL_START, struct.pack(">H", udp_port))
     peer_udp = (host, port)
-    _run_call(sock_tcp, udp_sock, peer_udp, session, args)
+    _run_call(sock_tcp, udp_sock, peer_udp, session, args, stats=stats)
     sock_tcp.close()
 
 

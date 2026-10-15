@@ -20,9 +20,9 @@ for entry, name, console in [
         pathex=[str(root / "src")],
         binaries=binaries,
         datas=datas,
-        hiddenimports=["sounddevice", "numpy"],
+        hiddenimports=["sounddevice", "numpy", "matplotlib.backends.backend_agg"],
         runtime_hooks=[str(root / "packaging" / "runtime_hook.py")],
-        excludes=["matplotlib", "scapy", "pytest", "hpqv.eval"],
+        excludes=["scapy", "pytest"],
     )
     pyz = PYZ(a.pure)
     exe = EXE(
