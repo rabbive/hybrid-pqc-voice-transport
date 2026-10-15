@@ -35,6 +35,10 @@ def build_native():
             run("git", "-C", source, "remote", "add", "origin", url)
             run("git", "-C", source, "fetch", "--depth", "1", "origin", revision)
         run("git", "-C", source, "checkout", "--detach", revision)
+        if name == "opus":
+            # The depth-1 fetch has no tags, so libopus would report "unknown". The
+            # pinned commit is exactly v1.5.2 upstream; CMake derives the version from the tag.
+            run("git", "-C", source, "tag", "-f", "v1.5.2", revision)
         options = ["-DBUILD_SHARED_LIBS=ON", "-DCMAKE_BUILD_TYPE=Release",
                    f"-DCMAKE_INSTALL_PREFIX={PREFIX}"]
         if name == "liboqs":
