@@ -1,4 +1,5 @@
 """Window smoke tests: build the real DemoWindow, no network, no audio."""
+import os
 import subprocess
 import sys
 import tkinter as tk
@@ -10,7 +11,12 @@ from hpqv.gui import DemoWindow
 
 def _tk_available():
     # Tk without a window server can abort the whole process (macOS) instead of
-    # raising TclError, so probe in a child before touching it here.
+    # raising TclError, so probe in a child before touching it here. Agents and
+    # CI run without a terminal; there the probe's abort still files a macOS
+    # crash report and pops a "Python quit unexpectedly" dialog, so only probe
+    # from an interactive terminal or when HPQV_GUI_TESTS=1 opts in.
+    if not (sys.stdin.isatty() or os.environ.get("HPQV_GUI_TESTS") == "1"):
+        return False
     try:
         probe = subprocess.run([sys.executable, "-c", "import tkinter; tkinter.Tk().destroy()"],
                                capture_output=True, timeout=30)
