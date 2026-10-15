@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This experiment measures loss repair and jitter-buffer behavior in real loopback calls. It records WAV output, packet counters, Telemetry MOS estimates, and segmental SNR against a clean live decode.
+This experiment measures loss repair and jitter-buffer behavior in real loopback calls. It records WAV output, packet counters, Telemetry MOS estimates, aligned whole-signal SNR, and repaired-frame SNR against a clean live decode.
 
 ## Method
 
@@ -14,31 +14,17 @@ The script runs each condition three times for 10 seconds and reports medians. I
 
 When you omit `--wav`, the script creates a deterministic 10-second, 48 kHz, mono, 16-bit PCM signal. The signal combines harmonics with a 4.3 Hz syllable-rate amplitude envelope. It is speech-like, not recorded speech.
 
-The clean reference is a separate live loopback decode of the same source WAV and duration. The SNR calculation aligns the streams at 20 ms frame boundaries and reuses `fec_recovery._segmental_snr_db`. The metric compares decoded audio with that clean decode, not with the source PCM.
+The clean reference is a separate live loopback decode of the same source WAV and duration, with the same FEC and bitrate settings. The scorer searches frame offsets from -25 through +25 and scores only the overlapping span. A positive offset means the received stream starts later than the clean reference. The CSV records the chosen offset.
+
+Whole-signal SNR is `10 log10(sum(reference²) / sum((reference - output)²))` over the aligned span. Repaired-frame SNR uses the same formula only on frames that the receiver had to repair after a sequence gap. Both metrics are uncapped. A perfect match is positive infinity. A row with no repaired frames has no repaired-frame SNR.
 
 Telemetry samples once per second. Measured loss is the difference between frames offered by the sender and received by the listener. Residual loss also counts late frames, then subtracts FEC-recovered frames. MOS uses the project's E-model estimate with residual loss, configured jitter, and effective delay.
 
 ## Results
 
-Each row is the median of three 10-second calls. Each run offered 500 frames. The range column shows the minimum and maximum residual-loss percentage across those runs.
+The previous full-sweep table used capped segmental SNR and pre-F1 telemetry. Do not cite those SNR values or use those residual-loss and MOS values as the final report. The full table and charts will be regenerated after the receiver-side telemetry merge.
 
-| Scenario | Measured loss | Residual loss, median (range) | FEC recovered | Mean MOS | Segmental SNR, median (range) | Late |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Clean | 0.0% | 0.0% (0.0–0.0) | 0 | 4.36 | 99.00 dB (99.00–99.00) | 0 |
-| Random 10%, silence | 9.8% | 9.8% (8.6–11.2) | 0 | 3.13 | 50.53 dB (40.51–53.04) | 0 |
-| Random 10%, PLC | 9.8% | 9.8% (8.6–11.2) | 0 | 3.13 | 49.80 dB (37.87–50.74) | 0 |
-| Random 10%, FEC | 9.8% | 1.2% (1.0–1.4) | 42 | 4.15 | 7.99 dB (7.81–8.14) | 0 |
-| Random 20%, silence | 18.6% | 18.6% (16.4–22.2) | 0 | 2.41 | 22.15 dB (-2.25–32.91) | 0 |
-| Random 20%, PLC | 18.6% | 18.6% (16.4–22.2) | 0 | 2.41 | 19.58 dB (-2.28–28.72) | 0 |
-| Random 20%, FEC | 18.6% | 3.8% (2.8–4.4) | 74 | 3.78 | 6.69 dB (-1.86–7.48) | 0 |
-| Burst 10%, B=3, PLC | 11.0% | 11.0% (9.4–11.8) | 0 | 3.07 | 58.86 dB (57.97–69.40) | 0 |
-| Burst 10%, B=3, FEC | 11.0% | 7.4% (6.4–8.0) | 18 | 3.47 | 7.88 dB (7.71–7.91) | 0 |
-| Delay 100 ± 30 ms, depth 2, FEC | 0.0% | 0.0% (0.0–0.0) | 17 | 4.20 | 8.79 dB (8.76–8.82) | 17 |
-| Delay 100 ± 30 ms, depth 6, FEC | 0.0% | 0.0% (0.0–0.0) | 0 | 3.79 | 9.10 dB (9.10–9.10) | 0 |
-
-FEC reduced median residual loss in all tested loss conditions. The deeper jitter buffer eliminated late packets in the delay condition, with a lower MOS estimate because the effective delay includes the buffer depth.
-
-FEC cases have much lower waveform SNR than the clean decode even when residual loss falls. Treat the SNR as a waveform-difference measure, not a perceptual score. The runs use a harmonic synthetic signal, and the metric is sensitive to decoder history and frame alignment.
+A 2-second, seed-42, 20% random-loss check offered 100 frames in each repair run. It measured repaired-frame SNR of 0.43 dB for FEC, -1.63 dB for PLC, and 0.00 dB for silence. FEC beat silence. PLC scored below silence on this synthetic waveform. Waveform SNR penalises phase-misaligned concealment; it is not a perceptual score. A zero-loss depth-6 delay call had no late frames and infinite whole-signal SNR against the FEC-enabled clean reference.
 
 ## What these results support
 

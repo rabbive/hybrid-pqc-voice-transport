@@ -213,6 +213,8 @@ class Stats:
         # Most recent frame energy each way, for the GUI level meters.
         self.tx_level = 0.0
         self.rx_level = 0.0
+        self.first_played_seq = None
+        self.repaired_sequences = []
 
     def snapshot(self):
         with self.lock:
@@ -290,6 +292,7 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event, s
 
 def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event, seed=None):
     from hpqv.jitter import JitterBuffer
+    from hpqv.playout import MAX_GAP
     from hpqv.playout import Playout
     ring = Keyring.of(session)
     codec = OpusCodec()
@@ -299,6 +302,12 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event, seed=No
     udp_sock.settimeout(0.5)
 
     def play(seq, opus):
+        with stats.lock:
+            if stats.first_played_seq is None:
+                stats.first_played_seq = seq
+            gap = 0 if playout.next_seq is None else seq - playout.next_seq
+            if 0 < gap <= MAX_GAP:
+                stats.repaired_sequences.extend(range(playout.next_seq, seq))
         r0, c0 = playout.recovered, playout.concealed
         frames = playout.frames(seq, opus)
         for pcm in frames:

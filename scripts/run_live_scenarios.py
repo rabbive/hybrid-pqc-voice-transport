@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -11,7 +12,8 @@ ROOT = Path("results")
 FIELDS = [
     "name", "knobs", "frames_offered", "frames_delivered", "frames_lost",
     "frames_late", "frames_recovered", "frames_concealed", "measured_loss_pct",
-    "residual_loss_pct", "mean_mos", "segmental_snr_db", "received_wav",
+    "residual_loss_pct", "mean_mos", "whole_signal_snr_db",
+    "repaired_frame_snr_db", "alignment_offset_frames", "received_wav",
 ]
 
 
@@ -58,14 +60,21 @@ def _charts(rows):
     plt.close(fig)
 
     for metric, label, file, title in (
-        ("segmental_snr_db", "Segmental SNR vs clean decode (dB)",
+        ("whole_signal_snr_db", "Whole-signal SNR vs clean decode (dB)",
          "live_scenarios_snr.png", "Received audio quality vs clean loopback"),
         ("mean_mos", "MOS (E-model estimate)",
          "live_scenarios_mos.png", "Estimated MOS by live scenario"),
     ):
         fig, ax = plt.subplots(figsize=(12, 5))
-        ax.bar(x, [r[metric] for r in rows],
+        values = [r[metric] for r in rows]
+        finite = [value for value in values if math.isfinite(value)]
+        infinity_height = max(finite, default=0) + 5
+        plotted = [value if math.isfinite(value) else infinity_height for value in values]
+        ax.bar(x, plotted,
                color=[colors[r["repair"]] for r in rows])
+        for index, value in enumerate(values):
+            if math.isinf(value):
+                ax.annotate("∞", (index, infinity_height), ha="center", va="bottom")
         ax.set_xticks(x, names, rotation=35, ha="right")
         ax.set_ylabel(label)
         ax.set_title(title)
@@ -105,12 +114,14 @@ def run(quick=False, wav_path=None):
             trials.append(row)
             print(f"{name} run {repetition + 1}/{repeats}: "
                   f"residual={row['residual_loss_pct']:.2f}% "
-                  f"MOS={row['mean_mos']:.2f} SNR={row['segmental_snr_db']:.2f}dB",
+                  f"MOS={row['mean_mos']:.2f} SNR={row['whole_signal_snr_db']:.2f}dB",
                   flush=True)
         median = {"name": name, "knobs": json.dumps(knobs, sort_keys=True),
                   "repair": repair, "runs": repeats,
                   "received_wav": trials[-1]["received_wav"]}
-        median.update({key: statistics.median(r[key] for r in trials) for key in numeric})
+        median.update({key: statistics.median(values) if (values := [r[key] for r in trials
+                                                                      if r[key] is not None])
+                       else None for key in numeric})
         medians.append(median)
     ROOT.mkdir(parents=True, exist_ok=True)
     with (ROOT / "live_scenarios.csv").open("w", newline="", encoding="utf-8") as out:

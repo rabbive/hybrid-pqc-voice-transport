@@ -12,11 +12,10 @@ from pathlib import Path
 import numpy as np
 
 from hpqv import control, demo, handshake
-from hpqv.audio import CHANNELS, FS
+from hpqv.audio import CHANNELS, FRAME_SAMPLES, FS
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
 from hpqv.demo import Stats
-from hpqv.eval.fec_recovery import _segmental_snr_db
 from hpqv.telemetry import Telemetry
 
 RESULTS_DIR = Path("results/live_scenarios")
@@ -88,7 +87,8 @@ def _run_loopback(source, received_path, knobs, seed):
     repair = knobs.get("repair", "silence")
     fec = knobs.get("fec", repair == "fec")
     outbound = {
-        k: knobs[k] for k in ("loss_pct", "loss_model", "burst_len", "delay_ms", "jitter_ms")
+        k: knobs[k] for k in ("loss_pct", "loss_model", "burst_len", "delay_ms",
+                               "jitter_ms", "bitrate")
         if k in knobs
     }
     caller_controls = CallControls(**outbound, fec=fec)
@@ -154,13 +154,61 @@ def _read_pcm(path):
         return np.frombuffer(f.readframes(f.getnframes()), dtype="<i2")
 
 
+def _whole_signal_snr_db(reference, reconstructed):
+    ref = reference.astype(np.float64)
+    noise = ref - reconstructed.astype(np.float64)
+    noise_power = np.sum(noise ** 2)
+    if noise_power == 0:
+        return float("inf")
+    signal_power = np.sum(ref ** 2)
+    if signal_power == 0:
+        return float("-inf")
+    return float(10 * np.log10(signal_power / noise_power))
+
+
+def _align_frames(reference, reconstructed):
+    best = None
+    for offset in range(-25, 26):
+        ref_start, out_start = max(offset, 0), max(-offset, 0)
+        frames = min(len(reference) // FRAME_SAMPLES - ref_start,
+                     len(reconstructed) // FRAME_SAMPLES - out_start)
+        if frames <= 0:
+            continue
+        ref = reference[ref_start * FRAME_SAMPLES:(ref_start + frames) * FRAME_SAMPLES]
+        out = reconstructed[out_start * FRAME_SAMPLES:(out_start + frames) * FRAME_SAMPLES]
+        score = _whole_signal_snr_db(ref, out)
+        if best is None or score > best[0]:
+            best = score, ref, out, offset, ref_start, out_start
+    if best is None:
+        empty = reference[:0]
+        return empty, reconstructed[:0], 0, 0, 0
+    _, ref, out, offset, ref_start, out_start = best
+    return ref, out, offset, ref_start, out_start
+
+
+def _repaired_frame_snr_db(reference, reconstructed, sequences, first_seq, out_start):
+    if first_seq is None:
+        return None
+    repaired = [seq - first_seq - out_start for seq in sequences]
+    repaired = [i for i in repaired if 0 <= i < len(reconstructed) // FRAME_SAMPLES]
+    if not repaired:
+        return None
+    indexes = np.concatenate([
+        np.arange(i * FRAME_SAMPLES, (i + 1) * FRAME_SAMPLES) for i in repaired
+    ])
+    return _whole_signal_snr_db(reference[indexes], reconstructed[indexes])
+
+
 def run_scenario(name: str, knobs: dict, seconds: float, wav_path=None, seed: int = 0) -> dict:
     """Run a real TCP/UDP call and return its measured impairment and quality row."""
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     if wav_path is None:
         wav_path = make_speech_wav(RESULTS_DIR / "speech_like.wav")
     received_path = RESULTS_DIR / f"{name}.wav"
-    key = hashlib.sha256(Path(wav_path).read_bytes() + str(seconds).encode()).hexdigest()[:16]
+    codec = {"fec": knobs.get("fec", knobs.get("repair") == "fec"),
+             "bitrate": knobs.get("bitrate", 0)}
+    key = hashlib.sha256(
+        Path(wav_path).read_bytes() + f"{seconds}:{codec}".encode()).hexdigest()[:16]
     reference_path = RESULTS_DIR / f"_clean_reference_{key}.wav"
     with tempfile.TemporaryDirectory() as tmp:
         source = Path(tmp) / "source.wav"
@@ -169,12 +217,14 @@ def run_scenario(name: str, knobs: dict, seconds: float, wav_path=None, seed: in
         if name == "clean" and not knobs:
             shutil.copyfile(received_path, reference_path)
         elif not reference_path.exists():
-            _run_loopback(source, reference_path, {}, seed)
+            _run_loopback(source, reference_path, codec, seed)
         reference, reconstructed = _read_pcm(reference_path), _read_pcm(received_path)
-        aligned = min(len(reference), len(reconstructed))
-        aligned -= aligned % (FS // 50)
-        snr = 0.0 if aligned == 0 else _segmental_snr_db(
-            reference[:aligned], reconstructed[:aligned])
+        aligned_ref, aligned_out, offset, _ref_start, out_start = _align_frames(
+            reference, reconstructed)
+        whole_snr = _whole_signal_snr_db(aligned_ref, aligned_out)
+        repaired_snr = _repaired_frame_snr_db(
+            aligned_ref, aligned_out, receiver.repaired_sequences,
+            receiver.first_played_seq, out_start)
         mean_mos = float(np.mean([row["mos"] for row in telemetry.rows]))
     offered = sender.sent + sender.dropped
     delivered = max(0, receiver.received - receiver.incoming_dropped)
@@ -186,6 +236,7 @@ def run_scenario(name: str, knobs: dict, seconds: float, wav_path=None, seed: in
         "frames_recovered": receiver.recovered, "frames_concealed": receiver.concealed,
         "measured_loss_pct": 100 * max(0, offered - delivered) / offered if offered else 0.0,
         "residual_loss_pct": 100 * residual / offered if offered else 0.0,
-        "mean_mos": mean_mos, "segmental_snr_db": snr,
+        "mean_mos": mean_mos, "whole_signal_snr_db": whole_snr,
+        "repaired_frame_snr_db": repaired_snr, "alignment_offset_frames": offset,
         "received_wav": str(received_path),
     }
