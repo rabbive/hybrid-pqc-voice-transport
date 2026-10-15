@@ -51,7 +51,7 @@ class ConnectionPanel:
         self.wav_entry.grid(row=1, column=1, sticky="w")
         self.wav_pick = ttk.Button(media, text="…", width=3, command=self._pick_wav)
         self.wav_pick.grid(row=1, column=2, padx=4)
-        ttk.Label(media, text="48 kHz mono 16-bit PCM; plays once, then the call ends.").grid(
+        ttk.Label(media, text="48 kHz mono 16-bit PCM; loops until you hang up.").grid(
             row=2, column=0, columnspan=3, sticky="w")
         self.record_check = ttk.Checkbutton(media, text="Record received audio",
                                             variable=self.record, command=self._on_record)

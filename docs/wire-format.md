@@ -6,7 +6,7 @@ Sig: ML-DSA-65
 Each record: 4-byte big-endian length ‖ payload.
 - Msg 1 (Initiator→Responder) HELLO: version(1B) ‖ kem_pub(1184B) ‖ sig_pub(1952B) ‖ sig_over(kem_pub‖sig_pub)(3309B)
 - Msg 2 (Responder→Initiator) ACCEPT: version(1B) ‖ kem_ciphertext(1088B) ‖ resp_sig_over(kem_pub‖ct)(3309B)
-Mutual auth (ADR-0002): the responder signs the transcript kem_pub‖ct with its
+Mutual auth (ADR-0002): the responder signs kem_pub‖ct with its
 Dilithium identity; the initiator verifies resp_sig against the responder's
 pinned public key before decapsulating. Both identities are pinned out-of-band.
 Both derive: HKDF-SHA256(shared_secret, info=b"hpqv v1") → 32B key ‖ 4B nonce_prefix(initiator→responder) ‖ 4B nonce_prefix(responder→initiator); each direction uses its own prefix so the two streams never share a (key,nonce).
@@ -41,20 +41,23 @@ Rotation rules (ADR-0004, `hpqv.keyring` / `hpqv.callctl`):
   a peer's next generation is applied immediately while older keys remain
   available for in-flight datagrams.
 
-## Voice datagram (over UDP, ≤1200B total, DF set)
+## Voice datagram (over UDP, ≤1200B total, enforced by `packet.seal`)
+On Linux the socket also sets Don't-Fragment (`IP_PMTUDISC_DO`); the macOS and
+Windows builds do not set DF.
+
 header ‖ ciphertext‖tag
 - header: version(1B) ‖ type(1B) ‖ seq(8B, big-endian) ‖ flags(1B)  = 11 bytes
 - flags bits 0–1 = key generation modulo 4. The receiver decrypts with the one
   retained key named by those bits. Up to three generations can be live when a
   peer rotates again before an older key retires. One AEAD attempt per
   datagram, never a try-all. The header is AAD, so changing the generation tag
-  fails authentication. Bits 2–7 are 0.
+  fails authentication. Bit 2 is the FEC hint (below); bits 3–7 are 0.
 - nonce = nonce_prefix(4B) ‖ seq(8B)  → 12B ChaCha20-Poly1305 nonce
 - ciphertext = ChaCha20Poly1305(key, nonce, opus_frame, aad=header); includes 16B tag
 
 ### Flags bit 2: encoder FEC hint (`packet.FLAG_FEC = 0x04`)
 
-Exception to "unused bits are 0" above. Bits 0–1 belong to the keyring;
+Bits 0–1 belong to the keyring;
 `Keyring.seal(extra_flags=...)` masks them out of anything else it is given.
 
 - Set when the sender's Opus encoder had in-band FEC on when it coded this frame,

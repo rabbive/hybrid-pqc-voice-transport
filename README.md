@@ -1,7 +1,8 @@
 # hpqv — A Hybrid TCP/UDP Transport for Fragmentation-Free Post-Quantum Voice
 
 A working implementation and evaluation of a voice transport that keeps a
-post-quantum handshake **off** the datagram path, so it never fragments.
+post-quantum handshake **off** the datagram path: TCP segments it, so it is never
+IP-fragmented, and no voice datagram exceeds 1200 B.
 
 **Team:** Cain Manoj (23BCE1663) · Sreenandu G (23BCE1120) · Ashwanth Kumaravel (23BCE1244)
 **Guide:** Dr. Renuka Devi S.
@@ -22,22 +23,29 @@ what the GUI handshake panel and `results/full_handshake.csv` report.)
 | Channel | Transport | Carries |
 |---|---|---|
 | **Control** | TCP | the PQC handshake (mutually authenticated), call setup, live key rotation, call end |
-| **Data** | UDP | Opus voice, every datagram ≤ 1200 B with the Don't-Fragment bit set |
+| **Data** | UDP | Opus voice, every datagram ≤ 1200 B (enforced by `packet.seal`) |
 
-Nothing ever fragments. Voice keeps UDP's latency; the oversized handshake gets
-TCP's reliability.
+No datagram exceeds 1200 B, so nothing we send needs fragmenting on any IPv4 path
+with MTU ≥ 1228 B; the handshake is on TCP and is segmented, not fragmented. On
+Linux the UDP socket also sets Don't-Fragment (`IP_PMTUDISC_DO`); the macOS and
+Windows builds do not set DF. Voice keeps UDP's latency; the oversized handshake
+gets TCP's reliability.
 
 ## Headline results
 
 Measured on the real implementation under `tc netem` impairment — not simulated.
 
-**Zero fragmentation, at every loss level.**
+**Zero fragments from the hybrid's voice datagrams, at every loss level.**
 
-| packet loss | our hybrid | naive PQC-over-UDP |
+| packet loss | our hybrid (voice) | naive probe (6,445 B blob over UDP) |
 |---|---|---|
-| 0–30 % | **0 fragments** | 4–5 fragments |
+| 0–30 % | **0 fragments** | 4–5 fragments captured |
 
-Source: [`results/eval.csv`](results/eval.csv).
+Source: [`results/eval.csv`](results/eval.csv). In this experiment (Track 2) every
+scenario runs the handshake over TCP before capture starts, so the handshake is not
+in these captures: it cannot fragment because it is on TCP (by construction, not
+captured). The naive probe is a HELLO-sized 6,445 B blob sent as one datagram: 5
+fragments; 4 are captured at 20–30 % loss.
 
 **Does the call connect?** The real ML-KEM-768 + ML-DSA-65 authenticated handshake
 (signatures verified, key agreed on both sides), every transport held to **one
@@ -66,9 +74,9 @@ What this supports, and what it does not:
   fragments per attempt and depends on them reaching the peer, which loopback
   does not challenge; the hybrid sends none. We do not claim TCP beats every
   reliable-UDP design.
-- These figures are lower than our earlier synthetic experiment (below) because
-  that one used a 20 s TCP timeout and a random payload. Quote these for "does a
-  real call set up".
+- The TCP figures are lower than the earlier experiment's (84 % vs 99 % at 20 %),
+  mainly because of the 3 s deadline instead of 20 s; naive UDP agrees within
+  sampling error. Quote these for "does a real call set up".
 
 *Earlier experiment (synthetic payload, not the full handshake).* Delivering a random
 10,842-byte blob, naive UDP with a 1 s timeout and no retry vs TCP with a 20 s
@@ -79,10 +87,11 @@ It does not run the authenticated handshake and gives the two transports unequal
 deadlines, so the table above supersedes it as the headline.
 
 **Voice repair.** In the offline recovery experiment, Opus in-band FEC leads
-no-FEC reconstruction by 24–30 dB segmental SNR at every lossy level (3 s
+silence-filling lost frames by 24–30 dB segmental SNR at every lossy level (3 s
 synthetic chirp, not speech, not a listening test —
 [docs/EXPERIMENT-fec-recovery.md](docs/EXPERIMENT-fec-recovery.md)). The live
-receiver now applies the same recovery.
+receiver uses the same `decode_fec` step, with Opus concealment instead of silence
+for frames it cannot rebuild.
 
 Full numbers, method and honest limitations: **[docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md)**.
 
@@ -101,14 +110,16 @@ Extract the entire ZIP and open HPQV. Use two computers on the same LAN, create 
 ```bash
 uv sync                       # Python 3.11, pinned
 uv run pytest -q --ignore=tests/test_gui_window.py
-                              # 186 pass on macOS; 16 container-only tests skip
+                              # 192 pass on macOS; 16 container-only tests skip
 ```
 
 The 16 skipped tests need `tc`/`tshark`/ns-3 and run only in the evaluation
 container (below). The 9 Tk window tests in `tests/test_gui_window.py` run only
 from an interactive terminal or with `HPQV_GUI_TESTS=1` (they skip without a
 display, because Tk can abort the whole process on macOS when probed headless).
-Counts above are from the 2026-10-16 macOS run on `chore/docs-final`.
+Counts are from 2026-10-16 runs on `chore/factcheck-fixes`: 217 collected; with
+the window tests ignored, macOS gives 192 passed, 16 skipped and the Linux container
+207 passed, 1 skipped (its libopus 1.4 lacks `opus_packet_has_lbrr`).
 
 macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib (see
 `docs/wire-format.md` → Runtime notes).
@@ -163,10 +174,12 @@ for a 1366×768 laptop or a projector:
   or a dropped control connection updates the status line.
 
 **Read the tiles correctly.** The outgoing-loss, delay, jitter, FEC and bitrate
-controls act on what the *peer* hears; the tiles, graph, MOS and export show the
-audio *you* receive, measured by your own receiver. Incoming loss, repair mode and
-jitter depth shape what you hear. The MOS is an ITU-T G.107 E-model estimate from
-that measured loss and delay, not a listening test.
+controls act on what the *peer* hears; the loss, recovery and MOS tiles and the
+graph describe the audio *you* receive, measured by your own receiver (*Sent*,
+*Dropped (out)* and *Largest datagram* count your own sender). Incoming
+loss, repair mode and jitter depth shape what you hear. The MOS is a simplified
+ITU-T G.107 E-model estimate from measured residual loss and an estimated delay
+(jitter-buffer depth plus delay above the call's minimum), not a listening test.
 
 Step-by-step script for a live demo: **[docs/DEMO-RUNBOOK.md](docs/DEMO-RUNBOOK.md)**.
 
@@ -252,8 +265,8 @@ with a live MOS estimate.
 - The in-call control channel (rotation, hang-up) is plain TCP after the handshake;
   an on-path attacker can desynchronise keys (denial of service, not disclosure).
   Authenticated control records are future work (ADR-0004).
-- FEC is single-frame lookahead: it recovers isolated losses and is defeated by
-  bursts. This is shown, not hidden, in the Burst loss preset.
+- FEC is single-frame lookahead: it recovers isolated losses, and in a burst only
+  the last lost frame. This is shown, not hidden, in the Burst loss preset.
 
 This is a final-year academic project, not production software: it has not been
 security-audited, and identities are pinned out-of-band rather than via a CA.

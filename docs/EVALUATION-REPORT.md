@@ -23,17 +23,22 @@ Post-quantum crypto keys are large. Our handshake carries **10,842 bytes** of PQ
 (Each message also carries a 1-byte version, so the wire payload is HELLO 6,446 B + ACCEPT 4,398 B = 10,844 B. The key-material figure is used in prose; the GUI panel and `results/full_handshake.csv` report the wire figure.)
 
 That is **7× the 1500-byte Internet MTU**. Sent naively over UDP it is chopped into IP
-fragments; middleboxes drop fragments and a single lost fragment destroys the whole datagram.
+fragments, and a single lost fragment destroys the whole datagram. Some middleboxes and
+firewalls drop fragments outright (RFC 8900); we have not measured this, so we cannot say by
+how much it would penalise naive UDP.
 
 **Our claim:** put the big handshake on a reliable TCP *control channel* and the voice on a
-*data channel* of UDP datagrams each capped at 1200 bytes with the Don't-Fragment bit set,
-so **nothing ever fragments** — while keeping voice latency low.
+*data channel* of UDP datagrams each capped at 1200 bytes (enforced by `packet.seal`). No
+datagram exceeds 1200 B, so nothing we send needs fragmenting on any IPv4 path with MTU ≥
+1228 B; the handshake is on TCP and is segmented, not fragmented. On Linux the UDP socket also
+sets Don't-Fragment (`IP_PMTUDISC_DO`); the macOS and Windows builds do not set DF. Voice
+latency stays low.
 
 ---
 
 ## 2. The three layers of testing
 
-### Layer 1 — Unit and integration tests (211 collected)
+### Layer 1 — Unit and integration tests (217 collected)
 Each module has tests that fail if its logic breaks. Run with `pytest`.
 
 | Test file(s) | Tests | What it protects |
@@ -49,8 +54,9 @@ Each module has tests that fail if its logic breaks. Run with `pytest`.
 | `test_keyring.py`, `test_callctl.py` | 11 + 7 | Live key rotation and call end (§9): in-flight old-generation packets decrypt, retired keys fail, out-of-sequence ROTATE ignored, simultaneous presses rotate once, hang-up and TCP close end the peer |
 | `test_controls.py`, `test_impair.py`, `test_loss_control.py` | 4 + 7 + 4 | Knob clamping; random and burst loss hit their targets; delay line reorders under jitter; a mid-call loss change takes effect in the sender |
 | `test_telemetry.py` | 15 | Receiver-side loss/residual/MOS, RFC 3550 jitter, segments, export files, WAV tee, bounded speaker backlog, handshake size/timing (§10) |
-| `test_gui_logic.py`, `test_gui_graph.py`, `test_gui_shell.py` | 29 + 17 + 19 | Presets, slider mapping, tile text, graph scaling, poll loop and close handling, rotate-button gating, export off the UI thread — all without a window |
+| `test_gui_logic.py`, `test_gui_graph.py`, `test_gui_shell.py` | 29 + 17 + 21 | Presets, slider mapping, tile text, graph scaling, poll loop and close handling, rotate-button gating, export off the UI thread, WAV input loops and its on-screen hint says so — all without a window |
 | `test_gui_window.py` | 9 | Builds the real Tk window; **skipped unless run from a terminal or with `HPQV_GUI_TESTS=1`** |
+| `test_demo_loop.py` | 4 | WAV input loops at EOF and stops on hang-up |
 | `test_demo_identity.py`, `test_smoke.py` | 3 | Identity file handling; the package imports |
 | `test_docs_current.py` | 1 | The generated tables in these docs still match `results/*.csv` |
 | `eval/test_mos.py`, `test_stats.py` | 5 + 4 | E-model MOS is monotonic in loss and delay, clamped, continuous at the G.107 knee; drop rate, jitter, TTFB maths |
@@ -60,17 +66,17 @@ Each module has tests that fail if its logic breaks. Run with `pytest`.
 | `eval/test_handshake_survival.py` | 3 | A fragmented handshake fails under loss where the hybrid survives — *container only* |
 | `eval/test_full_handshake.py` | 11 | The full-handshake experiment: sizes, common deadline, retry reuses the ACCEPT, deadline expiry joins the peer, naive timing excludes responder polling |
 
-**Status (macOS, 2026-10-16, `chore/docs-final`):**
-`pytest -q --ignore=tests/test_gui_window.py` → **186 passed, 16 skipped**. The 16
-skips are the container-only tests above (they need `tc`/`tshark`/ns-3, skip
-cleanly, never fail). The 9 window tests make up the rest of the 211 collected;
-they were not run in that session (no display) and need a terminal or
-`HPQV_GUI_TESTS=1`. This documentation pass did not re-run the container, so the
-container pass count is not restated here.
+**Status (2026-10-16, `chore/factcheck-fixes`):**
+`pytest -q --ignore=tests/test_gui_window.py` → macOS **192 passed, 16 skipped**; Linux
+container **207 passed, 1 skipped**. The 16 macOS skips are the container-only tests above
+(they need `tc`/`tshark`/ns-3, skip cleanly, never fail). The container's one skip is an
+LBRR-detection test that needs `opus_packet_has_lbrr`, which its libopus 1.4 lacks. The 9
+window tests make up the rest of the 217 collected; they were not run in that session (no
+display) and need a terminal or `HPQV_GUI_TESTS=1`.
 
 ### Layer 2 — Track 2: real-prototype measurement (PRIMARY evidence)
-The actual code — real PQC handshake, real Opus audio, real sockets — measured under
-controlled network impairment (`tc netem`). This is the evidence that counts.
+The actual code — real PQC handshake over TCP, Opus-encoded silence (100 frames per run),
+real sockets — measured under controlled network impairment (`tc netem`). This is the evidence that counts.
 
 ### Layer 3 — Track 3: NS-3 simulation (SECONDARY, corroborating)
 A model where PQC is represented by its *real* byte size and *real* CPU cost, used to
@@ -99,14 +105,17 @@ Three transports are compared:
 
 | Scenario | Handshake | Voice | Role |
 |---|---|---|---|
-| `hybrid` | TCP, app-framed ≤1200 B | UDP, ≤1200 B, DF set | **our design** |
-| `naive` | one oversized UDP datagram, no framing | UDP | the villain — fragments |
-| `tcp` | TCP | TCP | reliable but latency-prone |
+| `hybrid` | real handshake over TCP (length-prefixed records; kernel segments to MSS), before capture and netem start | UDP ≤1200 B, DF set (Linux) | **our design** |
+| `naive` | same TCP handshake, then a random 6,445 B (HELLO-sized) blob sent as one UDP datagram | UDP | fragmentation probe |
+| `tcp` | same TCP handshake; the connected socket is reused | TCP | reliable but latency-prone |
 
 Impairment via `tc netem`; packets captured with `tshark` and fragments counted by the filter
 `ip.flags.mf==1 || ip.frag_offset>0`. Primary sweep: loss 0/5/10/20/30 % at 50 ms delay,
 10 ms jitter, **median of 5 runs**. Secondary sweep: delay 20/50/100/200 ms at 0 % loss.
-MOS is computed from measured delay/jitter/loss with the ITU-T G.107 E-model.
+MOS is computed with the E-model from the configured netem delay (50 ms in the loss sweep) and
+jitter (10 ms) plus the measured frame loss. TTFB (Track 2) = time from starting to send to the
+first voice frame arriving, measured after the handshake and connection setup. The handshake is
+never impaired or captured in this track.
 
 ### Results — loss sweep (`results/eval.csv`)
 
@@ -121,7 +130,8 @@ MOS is computed from measured delay/jitter/loss with the ITU-T G.107 E-model.
 <!-- END GENERATED: track2-loss -->
 
 TTFB (full values in `results/eval.csv`): the hybrid's stays flat across the loss sweep, while
-tcp's is consistently higher and noisier — it pays for retransmissions during setup.
+tcp's is higher and noisier from 5 % loss up (at 0 % loss naive's is highest, 48.4 ms against
+tcp's 48.1 ms). TTFB here excludes the handshake, so this is not setup cost.
 
 ### Results — latency sweep (`results/eval_latency.csv`)
 
@@ -135,22 +145,28 @@ tcp's is consistently higher and noisier — it pays for retransmissions during 
 <!-- END GENERATED: track2-latency -->
 
 ### How to read this
-1. **The fragmentation claim is proven.** Hybrid fragments **zero** packets at every loss level;
-   naive always fragments. This is from real packet capture, not a model.
-2. **TCP is reliable but slow to start.** It never loses voice — its MOS is flat across the whole
-   sweep — but its setup cost is consistently the highest of the three, at every loss level and
-   every RTT.
+1. **Captures show zero fragments from the hybrid's voice datagrams at every loss level**;
+   the naive probe always fragments. The handshake cannot fragment because it is on TCP (by
+   construction, not captured: it runs before the capture starts).
+2. **TCP delivers every frame, but later.** Its MOS is flat because it loses no frames and the
+   model is fed the configured delay; its extra per-frame delay is not in this MOS. The tcp
+   scenario's first frame arrives about 4–10 ms later than hybrid's at every link delay
+   (`eval_latency.csv`), consistent with TCP's in-order delivery under 10 ms netem jitter.
+   It is not setup cost.
 3. **Voice quality degrades with loss as expected** for the UDP-based paths.
+4. **Why 13.6 ms TTFB at a 20 ms link delay?** TTFB is the first frame to *arrive*. The 100
+   frames are sent back to back and netem adds ±10 ms jitter, so the earliest arrival can beat
+   the nominal delay.
 
 ### Honest caveat you must be able to answer
 Naive's MOS is *not* meaningfully worse than hybrid's — across the sweep above the two track each
 other closely, and depending on the run either can come out ahead at a given loss level. The
 differences are within run-to-run noise.
 
-**Why:** fragmentation affects the **handshake**, not the voice stream. Voice frames (~160 B of
-Opus) never fragment in either design; only the 10.8 KB handshake does. And on a local link the
-kernel reassembles fragments reliably, so fragmentation never converts into a quality penalty here.
-The fragment count proves the *structural* property; Sections 6 and 7 measure its *consequence*.
+**Why:** naive's voice uses the same UDP path as the hybrid; the UDP blob is a fragmentation
+probe the voice stream never depends on, so the MOS columns cannot differ. Voice frames (~160 B of
+Opus) never fragment in either design. The fragment count shows the *structural* property;
+Sections 6 and 7 measure its *consequence* for the handshake.
 
 ---
 
@@ -158,10 +174,12 @@ The fragment count proves the *structural* property; Sections 6 and 7 measure it
 
 ### Method
 Two nodes on a point-to-point link (10 Mbps, configurable delay, `RateErrorModel` for loss).
-The handshake is modelled as a transfer of the **real** 10,842 bytes plus the **real** measured
-PQC CPU cost (≈0.34 ms, from a liboqs benchmark). Voice is a 20 ms-frame CBR stream. Three
-arrangements: `hybrid` (TCP handshake + UDP voice), `tcp` (all TCP), `quic` (UDP 1-RTT
-handshake + UDP voice). Metrics from FlowMonitor; MOS via the **same** E-model as Track 2.
+The handshake is modelled as a transfer of the **real** 10,842 bytes plus the liboqs operation
+cost measured by `pqc_cost.handshake_ms()` at sweep time. Voice is a 20 ms-frame CBR stream. Three
+arrangements: `hybrid` (TCP handshake + UDP voice), `tcp` (all TCP), `quic` (the handshake sent
+as one one-way UDP burst with no reply, + UDP voice). In NS-3, TTFB includes the handshake
+transfer. Metrics from FlowMonitor; MOS via the **same** E-model as Track 2, here fed the
+simulated delay, jitter and loss.
 
 ### Results — loss sweep at 50 ms (`results/ns3_eval.csv`)
 
@@ -187,30 +205,33 @@ TTFB at 0 % loss:
 | 200 ms | 506 ms | 506 ms | 110 ms |
 <!-- END GENERATED: ns3-latency -->
 
-QUIC's 1-RTT setup needs roughly *half* the round-trips of a TCP-based handshake, so its TTFB
-grows far more slowly with link delay.
+The QUIC proxy sends the handshake as one one-way UDP burst with no reply, so its TTFB is about
+half an RTT plus serialisation, against about 2.5 RTT for the TCP-based arrangements. This
+flatters the proxy relative to a real QUIC 1-RTT handshake.
 
 ### How to read this
-- QUIC's UDP 1-RTT handshake is the **fastest to first byte** when the link is clean, but its
-  retries make it the slowest under heavy loss (see the table above).
+- The QUIC proxy's one-way burst is the **fastest to first byte** when the link is clean, but
+  its retries make it the slowest under heavy loss (see the table above).
 - TCP never drops voice, but see the limitation below before calling it "best".
 - Hybrid sits where it should: TCP-grade reliable setup, UDP-grade voice latency.
 
 ### Documented model limitations (state these; details in `ns3/README.md`)
-1. **QUIC is a proxy** — ns-3 has no official QUIC module; we model UDP + 1-RTT, not real
-   congestion control or 0-RTT.
+1. **QUIC is a proxy** — ns-3 has no official QUIC module; we model a one-way UDP burst (no
+   reply flight), not a real 1-RTT handshake, congestion control or 0-RTT.
 2. **TCP's head-of-line latency is understated** — FlowMonitor timestamps each retransmitted
    segment as a fresh packet, so TCP's MOS stays ~4.38 even at 30 % loss. Read that as
-   *"TCP does not drop voice frames"*, **not** *"TCP is good for real-time voice."* The real
-   per-frame latency penalty is what Track 2 measures.
-3. **Jitter ≈ 0** — one flow on a constant-delay link has no queueing variance. Real jitter is
-   in the Track 2 numbers.
+   *"TCP does not drop voice frames"*, **not** *"TCP is good for real-time voice."* Track 2's
+   MOS does not capture that penalty either (it uses the configured delay).
+3. **Jitter ≈ 0** — one flow on a constant-delay link has no queueing variance. Track 2's
+   jitter column is not a valid network-jitter measure (unpaced sending against a 20 ms
+   reference); it is not used in any result.
 
 ---
 
 ## 6. Handshake survival under loss
 
-Sections 4–5 show hybrid never fragments. This section shows **what that is worth**. Full
+Sections 4–5 show the hybrid's datagrams do not fragment. This section shows **what keeping the
+handshake off UDP is worth**. Full
 write-up: `docs/EXPERIMENT-handshake-survival.md`.
 
 Fragmentation does not hurt the voice stream (voice frames are small and never fragment) — it
@@ -232,8 +253,8 @@ condition:
 still completes nearly all of them.** The hybrid pays for this in time rather than failure: its
 median handshake climbs into the hundreds of milliseconds and then past a second as TCP
 retransmits, and at the highest loss level it too starts failing a fraction of the time — the
-claim is a large margin, not invulnerability. Measurement tracks the `(1-p)^8` prediction,
-confirming the mechanism is fragment-loss amplification. Read the confidence intervals rather
+claim is a large margin, not invulnerability. Measurement is consistent with `(1-p)^8` within
+sampling error, as fragment-loss amplification predicts. Read the confidence intervals rather
 than the point values; at n=100 a cell moves several points between runs without meaning
 anything.
 
@@ -284,8 +305,9 @@ The retry interval (250 ms) versus Linux TCP's SYN-retransmission schedule (~1 s
 that at a 3 s deadline the comparison is largely between retry schedules; other deadlines or
 networks could move it. Loopback, not a real call or network; loss is independent, not bursty.
 
-**Why the numbers are lower than §6.** The earlier experiment used a 20 s TCP timeout, a 1 s
-no-retry UDP timeout and a random payload. Quote §7 for "does a real call set up".
+**Why the TCP numbers are lower than §6.** The TCP figures are lower than the earlier
+experiment's (84 % vs 99 % at 20 %), mainly because of the 3 s deadline instead of 20 s; naive
+UDP agrees within sampling error. Quote §7 for "does a real call set up".
 
 ---
 
@@ -314,13 +336,14 @@ Apple's arm64 ABI passes variadic arguments on the stack, so a ctypes call with 
 prototype put the value where libopus never read it. On those machines FEC was effectively off,
 with no error. The fix (`audio._encoder_set`) pads the call so the value lands on the stack on
 Darwin/arm64; `tests/test_audio.py` now reads the settings back from the encoder and asserts
-them. Linux/x86_64 was never affected, and the committed FEC and handshake results came from the
-Linux container, so they are unchanged.
+them. Linux (x86_64 and arm64) passes variadic arguments in registers and was never affected; the
+committed FEC and handshake results came from the Linux arm64 container, so they are unchanged.
 
 **What is and is not shown.**
 - The offline experiment (`docs/EXPERIMENT-fec-recovery.md`, §VI-D of `REPORT.md`) shows FEC
-  leading no-FEC by 24–30 dB segmental SNR on a synthetic chirp. That encoder chose CELT, where
-  `decode_fec` is equivalent to concealment, so part of that gap may be concealment, not LBRR.
+  leading silence-filling lost frames by 24–30 dB segmental SNR on a synthetic chirp. The chirp
+  encodes in hybrid mode (SILK + CELT) on both libopus 1.6.1 (macOS) and 1.4 (Linux container),
+  and the FEC packets carry LBRR, so `decode_fec` uses real LBRR data, not concealment.
   Segmental SNR is not a perceptual score.
 - The live path is covered by unit tests that pin the call order (PLC, then `decode_fec`),
   show an LBRR-bearing SILK stream recovers better than PLC, and check the receiver loop
@@ -351,8 +374,8 @@ Design record: `docs/adr/0004-live-key-rotation.md`; byte layout: `docs/wire-for
   attacker injecting an in-sequence `KEY_ROTATE` can desynchronise the keys (denial of
   service); it learns nothing, and could already cut the connection. Authenticating control
   records is future work. Datagrams the new sender emits before the peer has processed the
-  ROTATE are lost to the receiver; on a LAN this is a fraction of a frame and repair conceals
-  it. The fingerprint (first 8 hex digits of SHA-256 of the current key) is for people to
+  ROTATE are lost to the receiver; expected to be small on a LAN (not measured), and repair
+  conceals it. The fingerprint (first 8 hex digits of SHA-256 of the current key) is for people to
   compare aloud, not a secret.
 - **Evidence.** `test_keyring.py` and `test_callctl.py` (§2), including a live loopback call that
   rotates mid-call and ends both sides on hang-up. Not measured: behaviour across a real
@@ -381,8 +404,9 @@ screen. Local knob values are logged beside the data for context.
 
 **What it is not.** The MOS is a model output, not a listening test, and not PESQ/POLQA. It
 reflects loss and delay, not codec artefacts, echo or what the audio sounds like. The
-handshake panel reports measured handshake time and the HELLO/ACCEPT byte counts actually
-exchanged. Tile values come from one-second intervals and are noisy at low packet counts. The
+handshake panel reports measured handshake time and HELLO/ACCEPT sizes computed from the
+ML-KEM-768/ML-DSA-65 parameter sets (the measured byte count is printed by the CLI and written to
+`summary.md`). Tile values come from one-second intervals and are noisy at low packet counts. The
 speaker queue is bounded (jitter depth + 2 frames); frames skipped to keep latency bounded are
 counted separately (`skipped`) and appear in the export, not as loss.
 
@@ -408,7 +432,7 @@ Status of the Review III list (`docs/REVIEW-2-TO-REVIEW-3-CHANGES.md` §5):
 | Integrate missing-frame detection and next-packet FEC recovery into live playback | **Closed** — §8 |
 | Integrate live key rotation and complete control-message handling | **Closed** — §9 (rotation, call end) |
 | Measure the complete authenticated setup under impairment with a common deadline | **Closed** — §7 |
-| Evaluate paced speech, per-frame playback deadlines and realistic burst loss | **Partly closed** — the live pipeline now has a Gilbert–Elliott burst-loss model and 20 ms-paced WAV input (§11); no speech corpus, no perceptual scoring; the §7 handshake loss is still i.i.d. |
+| Evaluate paced speech, per-frame playback deadlines and realistic burst loss | **Partly closed** — the live pipeline now has a simple Gilbert (two-state) burst-loss model and 20 ms-paced WAV input (§11); no speech corpus, no perceptual scoring; the §7 handshake loss is still i.i.d. |
 | Automatic loss feedback / adaptive FEC | **Open** — repair mode, FEC and bitrate are manual knobs |
 | Validate the intended two-device demonstration and representative real network paths | **Open** — no recorded two-device run in the repo; no real middleboxes |
 | Dynamic PMTU handling | **Open** — fixed 1200 B cap |
@@ -430,7 +454,7 @@ Other limitations to state:
 # Build the evaluation container (once)
 docker build -t hpqv-eval ./eval
 
-# Full unit-test suite inside the container (container pass count not restated here)
+# Full unit-test suite inside the container (207 pass, 1 skips with --ignore=tests/test_gui_window.py)
 docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
   bash -c 'cd /work && uv sync -q && uv run pytest -q'
 
@@ -463,7 +487,7 @@ Outputs land in `results/`: `eval.csv`, `eval_latency.csv`, `ns3_eval.csv`, `ns3
 `handshake_survival.csv`, `fec_recovery.csv`, `full_handshake.csv`, and the figures `loss_vs_mos.png`, `loss_vs_fragments.png`, `latency_vs_ttfb.png`,
 `ns3_loss_vs_mos.png`, `ns3_latency_vs_ttfb.png`.
 
-On macOS: `pytest -q --ignore=tests/test_gui_window.py` (186 pass, 16 container-only tests skip; the 9
+On macOS: `pytest -q --ignore=tests/test_gui_window.py` (192 pass, 16 container-only tests skip; the 9
 window tests need a terminal or `HPQV_GUI_TESTS=1`).
 Note macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib.
 
@@ -474,7 +498,7 @@ Note macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib.
 | Metric | Meaning |
 |---|---|
 | **Fragment count** | IP datagrams with the More-Fragments flag set or a non-zero fragment offset, counted from a packet capture. **0 is the goal.** |
-| **MOS** | Mean Opinion Score, 1–5. Perceived call quality, computed from delay/jitter/loss with the ITU-T G.107 E-model (not human listeners). ≥4 good, ~3 fair, <2.5 poor. |
-| **TTFB** | Time To First Byte — how long from connection start until voice can flow. Dominated by handshake cost. |
+| **MOS** | MOS estimate (1–4.5 on this model): a simplified ITU-T G.107 E-model prediction from loss and delay; not perceived quality, not human listeners. ≥4 good, ~3 fair, <2.5 poor. |
+| **TTFB** | Track 2: time from starting to send to the first voice frame arriving, measured after the handshake and connection setup. In NS-3, TTFB includes the handshake transfer. |
 | **Jitter** | Variation in frame arrival spacing (ms). High jitter forces a bigger buffer, which adds delay. |
 | **Drop rate / voice loss** | Fraction of voice frames that never arrived. Measured at the application layer. |

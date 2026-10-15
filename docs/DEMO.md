@@ -14,14 +14,14 @@ macOS, unlike `tc netem`).
 python -m hpqv.gui
 ```
 
-A single window over the same call machinery as the CLI — same handshake, same
-transport, so you are demonstrating exactly what was measured.
+A single window over the same call machinery as the CLI — same handshake and packet
+code as the experiments; the live repair and telemetry path is covered by unit tests.
 
 1. Pick the shared `identity.json` (the **…** button), or **Create identity** once
    and copy the file privately to the other computer.
 2. Choose **Listen on port** on one machine, **Call** with `host:port` on the other.
-   Input is *Microphone* or a *WAV file* (48 kHz mono 16-bit; it plays once and then
-   the call ends on both sides). Tick *Record received audio* before Start to save
+   Input is *Microphone* or a *WAV file* (48 kHz mono 16-bit; the GUI loops it until
+   you hang up). Tick *Record received audio* before Start to save
    what you hear.
 3. **Start.** The state line moves: listening → handshake → *connected — talk*. The
    **Call** tab's handshake panel shows the algorithms, message sizes, TCP transport,
@@ -60,7 +60,8 @@ a shared secret for the demo — don't publish it.
 python -m hpqv.demo listen --port 9000 --identity-file identity.json
 ```
 
-Prints its fingerprint and waits for a call. Mic input / speaker output are the
+Prints the first 8 bytes of its ML-DSA public key (not the GUI's session-key
+fingerprint) and waits for a call. Mic input / speaker output are the
 defaults.
 
 ## 3. Call from the caller (machine B)
@@ -81,7 +82,7 @@ python -m hpqv.demo call 127.0.0.1:9000 --identity-file identity.json
 Once the handshake completes both sides print a live status line:
 
 ```
-[status] sent=120 received=118 dropped=0 recovered=0 drop_pct=0%
+[status] sent=120 received=118 dropped=0 recovered=0 drop_pct=0.0%
 ```
 
 ## 4. Packet loss from the CLI
@@ -112,13 +113,15 @@ mode, delay, jitter and the rest change mid-call (see the runbook).
 
 ```bash
 python -m hpqv.demo listen --port 9000 --identity-file identity.json \
-  --input file --wav in.wav --output file --out-wav out.wav --seconds 10
+  --input file --wav in.wav --output file --out-wav out.wav
 
 python -m hpqv.demo call 127.0.0.1:9000 --identity-file identity.json \
-  --input file --wav in.wav --output file --out-wav out.wav --seconds 10
+  --input file --wav in.wav --output file --out-wav out.wav
 ```
 
 `--wav` must be 48kHz mono 16-bit PCM and plays once, then the call ends on both sides.
+Add `--loop` to restart it at its end so the call runs until hang-up. `--seconds` sets
+the call length for mic input only; file input ignores it.
 Both `--input` and `--output` can be
 mixed independently (e.g. `--input mic --output file` to record what the far
 end would hear).

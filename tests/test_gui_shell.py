@@ -174,6 +174,16 @@ def test_wav_calls_loop_until_hang_up():
     assert wav.loop is True and mic.loop is False
 
 
+def test_wav_hint_on_screen_says_it_loops(monkeypatch):
+    from hpqv import gui_panels
+    monkeypatch.setattr(gui_panels, "tk", MagicMock())
+    monkeypatch.setattr(gui_panels, "ttk", MagicMock())
+    gui_panels.ConnectionPanel(MagicMock(), on_create_identity=lambda: None)
+    texts = [c.kwargs.get("text", "") for c in gui_panels.ttk.Label.call_args_list]
+    hint = next(t for t in texts if "48 kHz" in t)
+    assert "loops until you hang up" in hint and "plays once" not in hint
+
+
 # ---------------- 4: the graph stops scrolling after hang-up ----------------
 
 def test_graph_time_freezes_when_the_call_ends_and_restarts_on_next_connect():

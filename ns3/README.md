@@ -10,10 +10,11 @@ See ADR-0003 for why NS-3 is secondary, not primary, evidence.
   a `RateErrorModel` on the receiver that drops a `loss` fraction of packets.
 - **Handshake** as a one-time transfer of the *real* PQC byte volume
   (`hsBytes` = 10842 B, from `pqc_cost.handshake_bytes`) plus the *real* PQC CPU
-  cost (`hsMs`, from a liboqs benchmark). PQC is modelled, never executed.
+  cost (`hsMs`, measured by `pqc_cost.handshake_ms()` at sweep time; not saved to
+  the CSVs). PQC is modelled, never executed.
 - **Voice** as a 20 ms-frame CBR stream after the handshake.
 - Schemes: `hybrid` (TCP handshake + UDP voice), `tcp` (all TCP),
-  `quic` (UDP+1RTT handshake + UDP voice).
+  `quic` (handshake as one one-way UDP burst with no reply + UDP voice).
 - Metrics per run: TTFB, voice one-way delay, jitter, and app-level voice loss;
   MOS via the shared ITU-T E-model (`hpqv.eval.mos`).
 
@@ -27,8 +28,11 @@ docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
 ## Documented limitations (state these in the report/defense)
 
 1. **QUIC is a proxy, not real QUIC.** NS-3 has no official QUIC module, so QUIC
-   is modelled as UDP voice with a 1-RTT (UDP-burst) handshake. It captures
-   QUIC's UDP-transport loss behaviour, not its congestion control or 0-RTT.
+   is modelled as UDP voice with the handshake sent as one one-way UDP burst
+   (no reply flight), so its TTFB is about half an RTT plus serialisation,
+   against about 2.5 RTT for the TCP-based arrangements. This flatters the proxy
+   relative to a real QUIC 1-RTT handshake. It captures QUIC's UDP-transport loss
+   behaviour, not its handshake round trips, congestion control or 0-RTT.
 
 2. **TCP's head-of-line latency is understated.** Voice loss is measured at the
    application layer (delivered bytes / sent bytes), so `tcp` correctly shows
@@ -37,17 +41,19 @@ docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval \
    the head-of-line blocking / retransmit wait that makes TCP poor for real-time
    voice. Consequence: `tcp` MOS stays high (~4.4) even at 20% loss in this model.
    Read it as "TCP does not *drop* voice frames" — NOT as "TCP is good for
-   real-time voice." The real per-frame latency/jitter penalty is measured on the
-   real prototype in Track 2, and TCP's setup cost shows here as elevated TTFB.
+   real-time voice." Track 2's MOS does not capture that penalty either (it uses
+   the configured netem delay).
 
 3. **Jitter ≈ 0.** A single flow over a constant-delay link with no cross-traffic
    produces no queueing variance, so simulated jitter is ~0. NS-3 MOS here is
-   driven by loss and delay; real jitter is in the Track 2 measurements.
+   driven by loss and delay. Track 2's jitter column is not a valid
+   network-jitter measure either (unpaced sending against a 20 ms reference).
 
 ## How to read the comparison
 - **loss vs MOS:** UDP-based paths (`hybrid`, `quic`) drop frames under loss and
   their MOS falls; `tcp` does not drop (see limitation 2 for the caveat).
-- **latency vs TTFB:** the full-TCP path pays more handshake round-trips; the
-  hybrid keeps voice on a low-latency UDP path while its handshake rides TCP.
-- The hybrid's structural win — reliable, fragmentation-free handshake (Track 2)
-  **plus** low-latency UDP voice — is the point the two tracks make together.
+- **latency vs TTFB:** `hybrid` and `tcp` have identical TTFB (both carry the
+  handshake on TCP); the `quic` proxy is faster because it waits for no reply.
+- The hybrid's structural win — a reliable handshake on TCP that is never
+  IP-fragmented **plus** low-latency UDP voice — is the point the two tracks make
+  together.

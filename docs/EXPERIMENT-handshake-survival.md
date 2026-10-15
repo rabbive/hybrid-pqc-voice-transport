@@ -33,7 +33,7 @@ For each packet-loss level, attempt 100 handshakes over each transport and count
 | Transport | How the 10,842-byte handshake is sent | Fragments |
 |---|---|---|
 | `naive` | one oversized UDP datagram, no app framing | **8** |
-| `hybrid` | over TCP, app-framed under the MTU (our design) | **0** |
+| `hybrid` | over TCP, one length-prefixed record (kernel segments to MSS) (our design) | **0** |
 
 - Loopback MTU pinned to **1500** (Docker defaults it to 65536, where nothing fragments).
 - Loss applied with `tc netem` at 0 / 5 / 10 / 20 / 30 %.

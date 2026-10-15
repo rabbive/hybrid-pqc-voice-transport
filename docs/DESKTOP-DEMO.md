@@ -59,7 +59,7 @@ On Mac:
 ./hpqv-cli/hpqv-cli call 192.168.1.42:9000 --identity-file identity.json --seconds 300
 ```
 
-Add --drop-pct 30 for fixed loss in CLI mode. GUI loss changes live. GUI microphone calls run until you press Hang up (a WAV input ends the call when the file ends); the CLI defaults to 30 seconds unless --seconds is set. --help lists file-input/output options.
+Add --drop-pct 30 for fixed loss in CLI mode. GUI loss changes live. GUI calls (microphone or WAV, which loops) run until you press Hang up; the CLI defaults to 30 seconds unless --seconds is set. --help lists file-input/output options.
 
 ## Suggested two-device check
 
