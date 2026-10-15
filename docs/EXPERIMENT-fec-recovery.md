@@ -104,6 +104,15 @@ where recovery can act.
 - Loss is independent per-packet (seeded RNG), not a Gilbert-Elliott burst model. Real network
   loss is bursty, which would shrink the fraction of losses FEC can recover (fewer isolated
   single-packet losses with a surviving successor).
+- **Live path:** `hpqv.playout.Playout` now applies this same recovery in the real receiver
+  (`demo._receiver_loop`): a gap triggers `decode_fec` on the next packet, earlier frames of a
+  burst use Opus packet-loss concealment, and the CLI/GUI show a `recovered` counter. This
+  experiment itself is still offline.
+- Whether `decode_fec` returns real LBRR data or just concealment depends on the encoder having
+  picked a SILK/hybrid mode. On the synthetic chirp the encoder picks CELT, where `decode_fec`
+  output is identical to plain concealment, so part of the gain above may be concealment, not
+  LBRR. On Apple arm64 the opuslib CTLs (including inband FEC) also fail through ctypes' variadic
+  call ABI, so FEC is silently off there; Linux/x86_64 is unaffected.
 - 3-second synthetic chirp, not real speech. It exercises the codec across a frequency sweep but
   is not a substitute for a MOS-style listening test.
 

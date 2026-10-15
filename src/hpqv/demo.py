@@ -200,13 +200,16 @@ class Stats:
         self.sent = 0
         self.received = 0
         self.dropped = 0
+        # Frames rebuilt by Opus in-band FEC / concealed by PLC in the receiver.
+        self.recovered = 0
+        self.concealed = 0
         # Most recent frame energy each way, for the GUI level meters.
         self.tx_level = 0.0
         self.rx_level = 0.0
 
     def snapshot(self):
         with self.lock:
-            return self.sent, self.received, self.dropped
+            return self.sent, self.received, self.dropped, self.recovered
 
     def levels(self):
         with self.lock:
@@ -255,10 +258,22 @@ def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
 
 def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
     from hpqv.jitter import JitterBuffer
+    from hpqv.playout import Playout
     key, _send_prefix, recv_prefix = session
     codec = OpusCodec()
     jb = JitterBuffer(depth=jitter_depth)
+    playout = Playout(codec)
     udp_sock.settimeout(0.5)
+
+    def play(seq, opus):
+        r0, c0 = playout.recovered, playout.concealed
+        for pcm in playout.frames(seq, opus):
+            sink.write(pcm)
+        with stats.lock:
+            stats.recovered += playout.recovered - r0
+            stats.concealed += playout.concealed - c0
+            stats.rx_level = _rms(pcm)
+
     while not stop_event.is_set():
         try:
             dg, _addr = udp_sock.recvfrom(2048)
@@ -273,20 +288,17 @@ def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
         jb.push(seq, opus)
         with stats.lock:
             stats.received += 1
-        frame = jb.pop()
-        if frame is not None:
-            pcm = codec.decode(frame)
-            with stats.lock:
-                stats.rx_level = _rms(pcm)
-            sink.write(pcm)
-    for frame in jb.flush():
-        sink.write(codec.decode(frame))
+        popped = jb.pop()
+        if popped is not None:
+            play(*popped)
+    for popped in jb.flush():
+        play(*popped)
 
 
 def _status_loop(stats, loss, stop_event):
     while not stop_event.is_set():
-        sent, received, dropped = stats.snapshot()
-        print(f"\r[status] sent={sent} received={received} dropped={dropped} drop_pct={loss.pct}%   ",
+        sent, received, dropped, recovered = stats.snapshot()
+        print(f"\r[status] sent={sent} received={received} dropped={dropped} recovered={recovered} drop_pct={loss.pct}%   ",
               end="", flush=True)
         stop_event.wait(STATUS_INTERVAL)
     print()
@@ -324,8 +336,8 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
         source.close()
         sink.close()
 
-    sent, received, dropped = stats.snapshot()
-    print(f"call ended: sent={sent} received={received} dropped={dropped}")
+    sent, received, dropped, recovered = stats.snapshot()
+    print(f"call ended: sent={sent} received={received} dropped={dropped} recovered={recovered}")
 
 
 def listen(args):
