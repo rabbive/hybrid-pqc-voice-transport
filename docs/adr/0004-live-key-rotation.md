@@ -50,8 +50,8 @@ control round-trip margin.
 ## Consequences
 
 - In-flight datagrams survive a rotation. The only loss is datagrams the new
-  sender emits before the peer has processed `KEY_ROTATE` over TCP. On a LAN
-  that is a fraction of a frame, and playout repair conceals it.
+  sender emits before the peer has processed `KEY_ROTATE` over TCP. That is
+  expected to be small on a LAN (not measured), and playout repair conceals it.
 - The control channel is plain TCP, not authenticated after the handshake. An
   on-path attacker who injects an in-sequence `KEY_ROTATE` can desynchronise
   the keys (denial of service). It learns nothing, because each new key is

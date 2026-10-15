@@ -21,8 +21,9 @@ Guide: Dr. Renuka Devi S.
 
 Cover, one or two sentences each: (1) post-quantum handshakes exceed the MTU and
 fragment; (2) fragmentation destroys datagrams, so naive PQC-over-UDP voice fails
-to connect under loss; (3) we split control (TCP) from data (UDP) with app-layer
-framing under a 1200 B cap; (4) the result — zero fragments at every loss level,
+to connect under loss; (3) we carry the handshake on a TCP control channel
+(length-prefixed records) and voice on UDP datagrams capped at 1200 B; (4) the
+result — zero fragments from the hybrid's voice datagrams at every loss level,
 and, for the full authenticated handshake under one 3 s deadline, completion of 84 % (TCP)
 vs 18 % (naive UDP) at 20 % loss — noting plainly that a UDP design with HELLO retry does about
 as well as TCP (86 %), so the gain is retransmission; (5) corroborated by an NS-3 model comparing
@@ -42,12 +43,14 @@ The argument, in order:
    a move to post-quantum key exchange. These two requirements conflict.
 2. **The conflict, concretely.** One handshake carries 10,842 bytes of ML-KEM-768
    and ML-DSA-65 material — 7× the 1500 B MTU — so over UDP it becomes 8 IP
-   fragments. Middleboxes drop fragments, and one lost fragment kills the datagram.
+   fragments. Some middleboxes and firewalls drop fragments (RFC 8900; not measured
+   here), and one lost fragment kills the datagram.
 3. **The gap in existing work.** PQC has been studied in TLS and QUIC (see §II),
    but not for the specific problem of a *voice* transport whose handshake will
    not fit in a datagram.
 4. **Our contribution.** State these four plainly — they are what you defend:
-   - a hybrid TCP-control / UDP-data transport that never fragments;
+   - a hybrid TCP-control / UDP-data transport in which no datagram exceeds 1200 B
+     and the handshake is never IP-fragmented;
    - a mutually-authenticated PQC handshake with per-direction nonce separation;
    - measurement showing the *consequence* of fragmentation (call setup failure),
      not merely its occurrence, with the real handshake under one deadline (§VI-F);
@@ -94,13 +97,15 @@ PQC blob never becomes an IP fragment.
 **Data channel (UDP).** Unreliable by design, carrying Opus voice frames. A lost
 frame is concealed or recovered by forward error correction, never retransmitted,
 because retransmission arrives too late to be useful in a real-time call. Every
-datagram is held under a conservative 1200-byte cap with the IP Don't-Fragment
-bit set, so an oversized packet fails loudly instead of fragmenting silently.
+datagram is held under a conservative 1200-byte cap, enforced by `packet.seal`. On
+Linux the socket also sets Don't-Fragment (`IP_PMTUDISC_DO`), so a datagram too big
+for the path fails loudly instead of fragmenting silently; the macOS and Windows
+builds do not set DF.
 
 **Cryptographic construction.** The initiator sends a HELLO containing its
 ML-KEM-768 public key, its ML-DSA-65 public key and a signature over both. The
 responder verifies this against a pinned identity, encapsulates, and returns an
-ACCEPT containing the KEM ciphertext **and its own signature over the transcript**
+ACCEPT containing the KEM ciphertext **and its own signature over `kem_pub ‖ ct`**
 — so both peers authenticate each other. Both sides then derive, via HKDF-SHA256,
 a 32-byte voice key plus **two** 4-byte nonce prefixes, one per direction.
 
@@ -117,7 +122,7 @@ during development after review (see `docs/adr/`):
 
 1. **Mutual authentication.** The first design authenticated only the initiator,
    leaving the responder's ACCEPT unsigned and open to a man-in-the-middle. The
-   responder now signs the transcript `kem_pub ‖ ct`.
+   responder now signs `kem_pub ‖ ct`.
 2. **Per-direction nonce separation.** A single nonce prefix shared by both
    directions would have caused both peers to use the same (key, nonce) pair at
    sequence 0 — catastrophic for ChaCha20-Poly1305. Each direction now has its own
@@ -129,7 +134,8 @@ Source: `docs/wire-format.md`, `docs/adr/0002`, `docs/adr/0003`.
 
 ## IV. Implementation
 
-Implemented in Python 3.11 (about 2,700 lines in `src/hpqv/`, including the GUI, excluding tests), using liboqs for
+Implemented in Python 3.11 (about 2,700 lines in `src/hpqv/` including the GUI, 3,600 with the
+`eval/` harness, excluding tests), using liboqs for
 post-quantum primitives, `cryptography` for ChaCha20-Poly1305 and HKDF, and
 libopus for the codec.
 
@@ -143,9 +149,9 @@ libopus for the codec.
 | `audio.py` | Opus encode/decode, 48 kHz mono, 20 ms frames, in-band FEC; encoder CTLs incl. the Apple Silicon variadic-ABI workaround |
 | `playout.py` | live gap repair: silence / PLC / FEC-then-PLC, late-packet drop, LBRR detection |
 | `keyring.py`, `callctl.py` | live key rotation (generation tag, 4 s retirement) and call end over the control channel (ADR-0004) |
-| `controls.py`, `impair.py` | the thread-safe live knob set; random and Gilbert–Elliott burst loss; delay/jitter line |
+| `controls.py`, `impair.py` | the thread-safe live knob set; random and simple Gilbert (two-state) burst loss; delay/jitter line |
 | `telemetry.py` | receiver-side per-second stats, live E-model MOS, `timeline.csv` / `summary.md` / charts export |
-| `udp.py` | UDP socket with the Don't-Fragment bit set |
+| `udp.py` | UDP socket; sets Don't-Fragment on Linux only (`IP_PMTUDISC_DO`) |
 | `call.py`, `demo.py` | end-to-end call assembly; CLI demo; shared call loops |
 | `gui*.py` | Tk live-demo window over the same call machinery (presets, sliders, handshake panel, 60 s graph, export) |
 
@@ -153,8 +159,7 @@ libopus for the codec.
 authenticated as associated data; the nonce is the direction's 4-byte prefix
 concatenated with the 8-byte sequence number, so a (key, nonce) pair is never
 reused. The `seal` function raises if the assembled datagram would exceed 1200
-bytes, making the fragmentation-free property an enforced invariant rather than
-an intention.
+bytes, making the 1200 B cap an enforced invariant rather than an intention.
 
 **Forward error correction.** Opus in-band FEC (LBRR) embeds a low-bitrate copy
 of frame *N* inside packet *N+1*. Recovery is therefore a decoder action: when a
@@ -163,8 +168,9 @@ the missing frame, falling back to concealment when consecutive packets are lost
 The live receiver does this (§VI-G); a frame is counted as recovered only when the
 next packet really carried LBRR data.
 
-**Testing.** 211 collected tests (macOS run, 2026-10-16: 186 pass and 16
-container-only tests skip with `--ignore=tests/test_gui_window.py`; the 9 Tk window
+**Testing.** 217 collected tests (2026-10-16, with `--ignore=tests/test_gui_window.py`:
+192 pass and 16 container-only tests skip on macOS; 207 pass and 1 skips in the Linux
+container; the 9 Tk window
 tests run only from a terminal or with `HPQV_GUI_TESTS=1`): unit tests per module,
 integration tests for the end-to-end call, and experiment-level tests. Security-relevant behaviour is
 tested directly — a forged ACCEPT and a tampered ciphertext must both be
@@ -185,23 +191,29 @@ duration. Without this pin the fragmentation comparison silently measures nothin
 — an early run produced exactly that false negative.
 
 **Track 2 — real prototype (primary evidence).** The actual implementation, with
-real PQC handshakes and real Opus audio, measured under controlled impairment.
-Three transports are compared: our `hybrid`; `naive`, which sends the handshake
-as one oversized UDP datagram with no app-layer framing; and `tcp`, which carries
-both handshake and voice over TCP. Primary sweep: loss 0/5/10/20/30 % at 50 ms
+Opus-encoded silence (100 frames per run), measured under controlled impairment.
+All three scenarios first run the real handshake over TCP, before capture and
+netem start, so no handshake is impaired or captured. Then: our `hybrid` sends
+voice over UDP (≤1200 B); `naive` sends a random 6,445 B (HELLO-sized) blob as
+one UDP datagram, a fragmentation probe, then voice over UDP; and `tcp` sends
+voice over the already-connected TCP socket. Primary sweep: loss 0/5/10/20/30 % at 50 ms
 delay and 10 ms jitter, reporting the **median of 5 runs**. Secondary sweep: link
 delay 20/50/100/200 ms at 0 % loss. Fragments are counted from packet captures
 using the filter `ip.flags.mf==1 || ip.frag_offset>0`.
 
 **Track 3 — NS-3 model (secondary).** PQC is *modelled*, never executed: the real
-10,842-byte handshake volume and the real measured handshake CPU cost (≈0.34 ms
-from a liboqs benchmark) are injected into a two-node point-to-point simulation.
-This allows comparison against a QUIC-style arrangement that the real prototype
-cannot easily host.
+10,842-byte handshake volume and the liboqs operation cost measured by
+`pqc_cost.handshake_ms()` at sweep time are injected into a two-node point-to-point
+simulation. This allows comparison against a QUIC-style proxy (the handshake sent
+as one one-way UDP burst with no reply) that the real prototype cannot easily host.
 
-**Metrics.** Fragment count (target: 0); MOS computed from measured delay, jitter
-and loss via the ITU-T G.107 E-model; TTFB (time to first byte, dominated by
-handshake cost); interarrival jitter; and application-level frame loss.
+**Metrics.** Fragment count (target: 0); MOS estimate via a simplified ITU-T G.107
+E-model (Track 2: configured netem delay of 50 ms and jitter of 10 ms plus the
+measured frame loss; NS-3: simulated delay, jitter and loss); TTFB (Track 2: time
+from starting to send to the first voice frame arriving, measured after the
+handshake and connection setup; in NS-3, TTFB includes the handshake transfer); and
+application-level frame loss. Track 2's jitter column is not a valid network-jitter
+measure (unpaced sending against a 20 ms reference) and is not used in any result.
 
 ---
 
@@ -219,19 +231,21 @@ handshake cost); interarrival jitter; and application-level frame loss.
 | 30 % | **0** | 4 | 0 | 1.90 | 1.90 | 4.35 |
 <!-- END GENERATED: track2-loss -->
 
-The hybrid transport produces **zero IP fragments at every loss level**, while the
-naive baseline always fragments. This is the central claim, measured from packet
-captures of the real implementation.
+Captures show **zero fragments from the hybrid's voice datagrams at every loss
+level**, while the naive probe always fragments. The handshake cannot fragment
+because it is on TCP (by construction, not captured: it runs before the capture
+starts).
 
 **An honest reading of the MOS columns.** Naive's MOS is *not* meaningfully worse
 than the hybrid's; the two track each other within run-to-run noise. This is
-expected and should be stated rather than glossed: fragmentation does not affect
-the *voice stream*, because Opus frames are ~160 bytes and never fragment in
-either design. It affects the *handshake*. Section VI-F measures that consequence
-directly. Note also that `tcp` holds a flat MOS because it never loses voice — it
-pays elsewhere, in setup latency.
+expected and should be stated rather than glossed: naive's voice uses the same UDP
+path as the hybrid; the UDP blob is a fragmentation probe the voice stream never
+depends on, so the MOS columns cannot differ. Fragmentation affects the
+*handshake*; Section VI-F measures that consequence directly. `tcp`'s MOS is flat
+because it loses no frames and the model is fed the configured delay; its extra
+per-frame delay is not in this MOS either.
 
-### B. Setup latency versus link delay
+### B. First-frame latency versus link delay
 
 <!-- BEGIN GENERATED: track2-latency -->
 | link delay | hybrid TTFB | naive TTFB | tcp TTFB |
@@ -242,8 +256,9 @@ pays elsewhere, in setup latency.
 | 200 ms | 196.8 ms | 199.8 ms | 205.1 ms |
 <!-- END GENERATED: track2-latency -->
 
-The full-TCP arrangement pays a consistent penalty at every round-trip time,
-since voice as well as control must complete TCP setup.
+TTFB here excludes the handshake. The tcp scenario's first frame arrives about
+4–10 ms later than hybrid's at every link delay (`eval_latency.csv`), consistent
+with TCP's in-order delivery under 10 ms netem jitter. It is not setup cost.
 
 ### C. Does the handshake survive? (earlier experiment: synthetic payload)
 
@@ -263,8 +278,8 @@ condition:
 <!-- END GENERATED: survival -->
 
 At 20 % loss roughly one naive call in five connects, against 99 in 100 for the
-hybrid. The measured curve tracks the `(1-p)^8` prediction, confirming that the
-mechanism is fragment-loss amplification rather than an artefact of the setup.
+hybrid. The measured curve is consistent with `(1-p)^8` within sampling error, as
+fragment-loss amplification predicts.
 The hybrid pays for this in *time* rather than failure: its median handshake rises
 into the hundreds of milliseconds and beyond a second as TCP retransmits. It is
 not invulnerable — at the highest loss level a fraction of hybrid handshakes also
@@ -290,7 +305,7 @@ loss damage from Opus's own (perceptual, non-waveform-preserving) coding error:
 | 30 % | 33.7 dB | 10.0 dB | 39 | 28 |
 <!-- END GENERATED: fec-recovery -->
 
-FEC leads by 24–30 dB at every lossy level. Recovery degrades as loss rises (28 of
+FEC leads silence-filling lost frames by 24–30 dB at every lossy level. Recovery degrades as loss rises (28 of
 39 frames at 30 %) because single-frame lookahead cannot recover *consecutive*
 losses.
 
@@ -315,12 +330,13 @@ losses.
 | 200 ms | 506 ms | 506 ms | 110 ms |
 <!-- END GENERATED: ns3-latency -->
 
-QUIC's 1-RTT setup needs roughly half the round-trips of a TCP-based handshake, so
-its TTFB grows far more slowly with link delay — though its retries make it the
-slowest under heavy loss.
+The QUIC proxy sends the handshake as one one-way UDP burst with no reply, so its
+TTFB is about half an RTT plus serialisation, against about 2.5 RTT for the
+TCP-based arrangements. This flatters the proxy relative to a real QUIC 1-RTT
+handshake. Its retries make it the slowest under heavy loss.
 
 **Stated limitations of the model** (detailed in `ns3/README.md`): QUIC is
-approximated as UDP with a 1-RTT handshake, as ns-3 has no official QUIC module;
+approximated as a one-way UDP burst with no reply flight, as ns-3 has no official QUIC module;
 FlowMonitor timestamps retransmitted segments as fresh packets, so the model
 *understates* TCP's head-of-line latency and TCP's MOS stays high — read that as
 "TCP does not drop voice frames", not "TCP is good for real-time voice"; and a
@@ -341,14 +357,16 @@ single **3 s deadline**, 100 attempts per cell, loopback MTU 1500, i.i.d. `tc ne
 | 20 % | 84 % | 18 % | 17 % | 86 % |
 | 30 % | 56 % | 6 % | 6 % | 52 % |
 
-Naive UDP tracks `(1−p)^8`, confirming fragment-loss amplification. TCP completes far more
+Naive UDP is consistent with `(1−p)^8` within sampling error, as fragment-loss amplification
+predicts. TCP completes far more
 often than naive UDP. **A UDP design that retransmits its HELLO performs about as well as TCP**:
 the improvement over naive UDP is retransmission, not TCP in particular. We do not claim TCP
 beats every reliable-UDP design; the retry variant still sends 8 IP fragments per attempt and
 depends on their delivery, which loopback does not test, while the hybrid sends none. The
 comparison at a 3 s deadline is partly one of retry schedules (250 ms against Linux TCP's
-SYN retransmission of roughly 1 s then 3 s). Figures are lower than §VI-C because that
-experiment used unequal timeouts and a random payload.
+SYN retransmission of roughly 1 s then 3 s). The TCP figures are lower than §VI-C's (84 % vs
+99 % at 20 %), mainly because of the 3 s deadline instead of 20 s; naive UDP agrees within
+sampling error.
 
 ### G. Live FEC recovery, and an Apple Silicon bug
 
@@ -396,9 +414,10 @@ figures are not restated here).
 
 Points to make, in roughly this order:
 
-1. **What the evidence actually supports.** The fragmentation-free property is
-   proven structurally (fragment counts) *and* consequentially (handshake
-   survival). Be precise: the win is in **call establishment under loss**, not in
+1. **What the evidence actually supports.** Captures show zero fragments from the
+   hybrid's voice datagrams; the handshake cannot fragment because it is on TCP (by
+   construction, not captured). The consequence is measured in handshake
+   completion, consistent with `(1−p)^8` within sampling error. Be precise: the win is in **call establishment under loss**, not in
    steady-state voice quality. Claiming better MOS would overstate the result.
 2. **Why the MOS results are flat, and why that is fine.** Explain the mechanism
    (§VI-A). A panel is likely to probe this — you are better off raising it first.
@@ -406,9 +425,9 @@ Points to make, in roughly this order:
    delay. Argue why a slow connect beats a failed connect for a voice call.
 4. **Threat model.** Mutual authentication with out-of-band pinning; no CA
    hierarchy; what an attacker can and cannot do.
-5. **Validity.** Emulated local link, not the open Internet. Note that real
-   middleboxes commonly discard fragments outright, which would penalise the naive
-   baseline *further* — the results are conservative in our favour.
+5. **Validity.** Emulated local link, not the open Internet. Some middleboxes and
+   firewalls drop fragments (RFC 8900); we have not measured this, so we cannot say
+   by how much it would penalise naive UDP.
 6. **The retry result.** Say first that UDP with HELLO retry matches TCP on handshake
    completion at a 3 s deadline (§VI-F). The case for the hybrid is then structural: zero
    fragments, no dependence on fragment delivery, one reliable channel for control and key

@@ -99,7 +99,8 @@ cannot fragment. Voice datagrams are far under the cap.
 **Honest caveats.**
 - *UDP fragments: 0 (by design: handshake is on TCP)* in the panel is a constant, true by construction (the handshake is TCP; the
   voice sealer refuses datagrams over 1200 B). The **measured** evidence is the packet-capture
-  result in `results/eval.csv` (hybrid 0 fragments at every loss level).
+  result in `results/eval.csv`: zero fragments from the hybrid's voice datagrams at every loss
+  level. The handshake ran over TCP before that capture started, so it is not in it.
 - 10,844 B on the wire = the 10,842 B of key material quoted in the docs + a 1-byte version in
   each message.
 - *Handshake time* here is one LAN handshake with no loss. For handshakes **under loss**, point to
@@ -158,9 +159,11 @@ rebuild from.
   filled by concealment (or silence) count as *Concealed*, not recovered.
 - FEC looks one frame ahead: it needs the *next* packet to arrive. At 20 % random loss more
   losses have a lost successor, so the recovered share falls.
-- Offline evidence for FEC is a 3 s synthetic chirp: 24–30 dB segmental SNR better than no FEC
-  ([EXPERIMENT-fec-recovery.md](EXPERIMENT-fec-recovery.md)); not a listening test, and part of that gain may be
-  concealment rather than LBRR. Tell them live recovery is shown by the counter and by ear.
+- Offline evidence for FEC is a 3 s synthetic chirp: 24–30 dB segmental SNR better than
+  silence-filling lost frames ([EXPERIMENT-fec-recovery.md](EXPERIMENT-fec-recovery.md)); not a
+  listening test. The chirp encodes in hybrid mode with LBRR, so that gain is real LBRR recovery,
+  but the baseline is silence, not Opus concealment. Tell them live recovery is shown by the
+  counter and by ear.
 - Incoming loss is applied after decryption on B and is random only; it models loss on B's side of
   the link. It is not a substitute for loss on the network path.
 - If the room is too noisy to hear the difference, replay B's recording (Call tab recording path)
@@ -169,7 +172,7 @@ rebuild from.
 ### 10:00–12:00 · Burst loss defeats FEC
 
 **Click.** **B**: Incoming loss back to 0 %, repair = *FEC + concealment*. **A**: *Burst loss*
-preset (10 % average loss, mean burst 4 packets, Gilbert–Elliott model).
+preset (10 % average loss, mean burst 4 packets, simple Gilbert two-state model).
 **Say.** "Same average loss as before, but it arrives in runs. FEC only looks one frame ahead, so
 it cannot rebuild a run."
 **Panel should see (B).** *Loss you hear* near 10 %, but *Recovered* is a small fraction of the
@@ -226,7 +229,7 @@ generation 2.
   plain TCP after the handshake; an on-path attacker could desynchronise the keys (denial of
   service, no disclosure) — [ADR-0004](adr/0004-live-key-rotation.md).
 - Datagrams sent by the new key before the peer processes the rotation message are lost to the
-  receiver; on a LAN this is a fraction of a frame and repair conceals it.
+  receiver; expected to be small on a LAN (not measured), and repair conceals it.
 
 ### 17:00–18:00 · Hang up from one side ends both
 
@@ -267,8 +270,8 @@ also carries rotation and call-end. We have not measured paths that drop fragmen
 
 **If fragmentation does not change voice MOS, why does it matter?**
 Because it changes whether the call connects. Voice frames never fragment in either design;
-the 10.8 KB handshake does. Naive UDP completion follows `(1−p)^8`
-([EVALUATION-REPORT.md](EVALUATION-REPORT.md) §4, §7).
+the 10.8 KB handshake does in the naive design. Naive UDP completion is consistent with `(1−p)^8`
+([EVALUATION-REPORT.md](EVALUATION-REPORT.md) §6, §7).
 
 **Is the MOS a real listener score?**
 No. It is an ITU-T G.107 E-model estimate from residual loss and delay (§10). The offline FEC
@@ -287,7 +290,8 @@ fraction of the cap.
 
 **What does "UDP fragments: 0" prove?**
 By construction, nothing on UDP exceeds 1200 B and the handshake is on TCP. The measurement is the
-tshark capture in `results/eval.csv`, not the panel text.
+tshark capture in `results/eval.csv`, not the panel text: zero fragments from the hybrid's voice
+datagrams at every loss level. The handshake runs before that capture, so it is not captured.
 
 **Why 10,844 B on screen but 10,842 B in the slides?**
 10,842 B is key and signature material; each of the two messages adds a 1-byte version.
@@ -307,7 +311,8 @@ Evaluation is on loopback with `tc netem` (independent loss) and the NS-3 model.
 run and real-network/middlebox validation are open items ([EVALUATION-REPORT.md](EVALUATION-REPORT.md) §12).
 
 **How does this compare with QUIC or TLS?**
-We do not claim to beat them. NS-3's QUIC is a proxy (UDP + 1-RTT), and no real QUIC/TLS stack is
+We do not claim to beat them. NS-3's QUIC is a proxy (a one-way UDP burst with no reply, which
+flatters it against a real 1-RTT handshake), and no real QUIC/TLS stack is
 benchmarked ([ns3/README.md](../ns3/README.md)).
 
 **Why is the loss slider on A, but the tiles on B move?**
