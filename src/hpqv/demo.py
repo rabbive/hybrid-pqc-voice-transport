@@ -11,6 +11,7 @@ import wave
 
 from hpqv import control, handshake as h, packet
 from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS
+from hpqv.controls import CallControls
 
 STATUS_INTERVAL = 1.0
 
@@ -172,28 +173,6 @@ class FrameSink:
                     w.writeframes(pcm)
 
 
-class LossControl:
-    """Packet-drop percentage that can be changed while a call is running.
-
-    The sender reads this every frame, so the GUI slider (or any other
-    controller) takes effect mid-call instead of requiring a restart.
-    """
-
-    def __init__(self, pct: float = 0.0):
-        self._lock = threading.Lock()
-        self._pct = float(pct)
-
-    @property
-    def pct(self) -> float:
-        with self._lock:
-            return self._pct
-
-    @pct.setter
-    def pct(self, value: float) -> None:
-        with self._lock:
-            self._pct = max(0.0, min(100.0, float(value)))
-
-
 class Stats:
     def __init__(self):
         self.lock = threading.Lock()
@@ -204,6 +183,12 @@ class Stats:
         # FEC / concealed by PLC in the receiver. Not the same as `dropped`.
         self.recovered = 0
         self.concealed = 0
+        self.late = 0                # arrived after their slot was played/repaired
+        self.incoming_dropped = 0    # dropped on purpose by receiver-side loss
+        self.max_datagram = 0        # largest UDP payload sent, bytes (cap: 1200)
+        self.key_gen = 0             # live key-rotation generation
+        self.handshake_ms = 0.0
+        self.handshake_bytes = 0
         # Most recent frame energy each way, for the GUI level meters.
         self.tx_level = 0.0
         self.rx_level = 0.0
@@ -211,6 +196,10 @@ class Stats:
     def snapshot(self):
         with self.lock:
             return self.sent, self.received, self.dropped, self.recovered
+
+    def as_dict(self) -> dict:
+        with self.lock:
+            return {k: v for k, v in vars(self).items() if k != "lock"}
 
     def levels(self):
         with self.lock:
@@ -230,7 +219,7 @@ def _rms(pcm: bytes) -> float:
     return min(1.0, (total / len(samples)) ** 0.5 / 32768.0)
 
 
-def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
+def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
     key, send_prefix, _recv_prefix = session
     codec = OpusCodec()
     seq = 0
@@ -242,7 +231,7 @@ def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
             with stats.lock:
                 stats.tx_level = level
             opus = codec.encode(pcm)     # encode first: a real loss happens after the encoder
-            drop_pct = loss.pct          # re-read every frame: changeable mid-call
+            drop_pct = controls.get("loss_pct")   # re-read every frame: changeable mid-call
             if drop_pct > 0 and random.random() * 100 < drop_pct:
                 with stats.lock:
                     stats.dropped += 1
@@ -257,12 +246,12 @@ def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
         stop_event.set()
 
 
-def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
+def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
     from hpqv.jitter import JitterBuffer
     from hpqv.playout import Playout
     key, _send_prefix, recv_prefix = session
     codec = OpusCodec()
-    jb = JitterBuffer(depth=jitter_depth)
+    jb = JitterBuffer(depth=controls.get("jitter_depth"))
     playout = Playout(codec)
     udp_sock.settimeout(0.5)
 
@@ -298,37 +287,38 @@ def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
         play(*popped)
 
 
-def _status_loop(stats, loss, stop_event):
+def _status_loop(stats, controls, stop_event):
     while not stop_event.is_set():
         sent, received, dropped, recovered = stats.snapshot()
-        print(f"\r[status] sent={sent} received={received} dropped={dropped} recovered={recovered} drop_pct={loss.pct}%   ",
+        print(f"\r[status] sent={sent} received={received} dropped={dropped} recovered={recovered} drop_pct={controls.get('loss_pct')}%   ",
               end="", flush=True)
         stop_event.wait(STATUS_INTERVAL)
     print()
 
 
 def _run_call(sock_tcp, udp_sock, dest, session, args,
-              stats=None, loss=None, stop_event=None):
-    """Run a call. The GUI passes in its own stats/loss/stop_event so it can
-    watch the counters and move the loss slider while the call is live."""
+              stats=None, controls=None, stop_event=None):
+    """Run a call. The GUI passes in its own stats/controls/stop_event so it can
+    watch the counters and turn the knobs while the call is live."""
     source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
     sink = FrameSink(args.output, wav_path=args.out_wav)
     stats = stats if stats is not None else Stats()
-    loss = loss if loss is not None else LossControl(args.drop_pct)
+    controls = controls if controls is not None else CallControls(
+        loss_pct=args.drop_pct, jitter_depth=args.jitter_depth)
     stop_event = stop_event if stop_event is not None else threading.Event()
 
-    if loss.pct > 0:
-        print(f"loss injection active: dropping {loss.pct}% of outgoing packets")
+    if controls.get("loss_pct") > 0:
+        print(f"loss injection active: dropping {controls.get('loss_pct')}% of outgoing packets")
 
-    status_thread = threading.Thread(target=_status_loop, args=(stats, loss, stop_event))
+    status_thread = threading.Thread(target=_status_loop, args=(stats, controls, stop_event))
     recv_thread = threading.Thread(
         target=_receiver_loop,
-        args=(udp_sock, session, sink, args.jitter_depth, stats, stop_event))
+        args=(udp_sock, session, sink, controls, stats, stop_event))
     status_thread.start()
     recv_thread.start()
 
     try:
-        _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event)
+        _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event)
         if args.input == "file":
             # let receiver drain remaining in-flight datagrams
             time.sleep(0.5)

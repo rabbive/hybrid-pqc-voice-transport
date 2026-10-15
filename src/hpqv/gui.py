@@ -19,6 +19,7 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from hpqv import control, demo
+from hpqv.controls import CallControls
 
 POLL_MS = 200
 
@@ -30,7 +31,7 @@ class DemoWindow:
         root.geometry("540x470")
 
         self.stats = demo.Stats()
-        self.loss = demo.LossControl(0.0)
+        self.controls = CallControls()
         self.stop_event = threading.Event()
         self.events = queue.Queue()        # worker -> UI messages
         self.worker = None
@@ -129,7 +130,7 @@ class DemoWindow:
 
     def _on_loss(self, value):
         pct = float(value)
-        self.loss.pct = pct
+        self.controls.set(loss_pct=pct)
         self.loss_label.config(text=f"{pct:.0f} %")
 
     def _args(self, identity_file):
@@ -140,7 +141,7 @@ class DemoWindow:
         a.identity_file = identity_file
         a.input, a.wav = "mic", None
         a.output, a.out_wav = "speaker", None
-        a.drop_pct = self.loss.pct
+        a.drop_pct = self.controls.get("loss_pct")
         a.seconds = 3600          # run until Hang up
         a.jitter_depth = 3
         return a
@@ -204,7 +205,7 @@ class DemoWindow:
 
             self.events.put(("state", "connected — talk"))
             demo._run_call(conn, udp, dest, session, args,
-                           stats=self.stats, loss=self.loss, stop_event=self.stop_event)
+                           stats=self.stats, controls=self.controls, stop_event=self.stop_event)
             self.events.put(("state", "call ended"))
             conn.close()
         except Exception as e:                      # surface failures in the UI, not a dead thread

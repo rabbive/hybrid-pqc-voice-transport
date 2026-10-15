@@ -1,6 +1,6 @@
 """The GUI's loss slider is only meaningful if the sender re-reads it mid-call.
 
-Before LossControl existed, drop_pct was a fixed value captured at call setup,
+Before live controls existed, drop_pct was a fixed value captured at call setup,
 so changing loss meant hanging up and dialling again — the demo could not show
 degradation and recovery in one continuous call.
 """
@@ -8,7 +8,8 @@ import socket
 import threading
 
 from hpqv import handshake as h
-from hpqv.demo import LossControl, Stats, _sender_loop
+from hpqv.controls import CallControls
+from hpqv.demo import Stats, _sender_loop
 
 FRAME = b"\x00\x01" * 960          # one 20 ms frame of PCM
 
@@ -23,7 +24,7 @@ class _Source:
     def frames(self):
         for i in range(self.count):
             if i == self.flip_at:
-                self.loss.pct = self.flip_to
+                self.loss.set(loss_pct=self.flip_to)
             yield FRAME
 
 
@@ -36,15 +37,15 @@ def _session():
 
 
 def test_loss_control_clamps_to_valid_range():
-    loss = LossControl(0)
-    loss.pct = -10
-    assert loss.pct == 0
-    loss.pct = 250
-    assert loss.pct == 100
+    loss = CallControls(loss_pct=0)
+    loss.set(loss_pct=-10)
+    assert loss.get("loss_pct") == 0
+    loss.set(loss_pct=250)
+    assert loss.get("loss_pct") == 100
 
 
 def test_sender_honours_a_mid_call_loss_change():
-    loss = LossControl(0.0)
+    loss = CallControls(loss_pct=0.0)
     stats = Stats()
     sink = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sink.bind(("127.0.0.1", 0))
@@ -104,12 +105,12 @@ def test_sender_encodes_every_frame_and_drops_only_the_datagram(monkeypatch):
 
         def frames(self):
             for i in range(self.count):
-                self.loss.pct = 100 if i == self.drop_at else 0
+                self.loss.set(loss_pct=100 if i == self.drop_at else 0)
                 yield FRAME
 
     monkeypatch.setattr(demo, "OpusCodec", SpyCodec)
     key, send_prefix, recv_prefix = _session()
-    loss, stats, sock = LossControl(0.0), Stats(), FakeSock()
+    loss, stats, sock = CallControls(loss_pct=0.0), Stats(), FakeSock()
     _sender_loop(sock, ("127.0.0.1", 9), (key, send_prefix, recv_prefix),
                  OneLossSource(loss, drop_at=3, count=8), loss, stats,
                  threading.Event())

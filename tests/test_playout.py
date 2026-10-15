@@ -11,6 +11,7 @@ import pytest
 
 from hpqv import handshake as h, packet
 from hpqv.audio import FRAME_SAMPLES, FS, OpusCodec, _encoder_get, _encoder_set
+from hpqv.controls import CallControls
 from hpqv.demo import Stats, _receiver_loop
 from hpqv.eval.fec_recovery import _frames, _segmental_snr_db, _test_signal
 from hpqv.playout import MAX_GAP, Playout
@@ -205,7 +206,7 @@ def _receive(order, depth):
 
     sink, stats, stop = Sink(), Stats(), threading.Event()
     t = threading.Thread(
-        target=_receiver_loop, args=(rx, session, sink, depth, stats, stop))
+        target=_receiver_loop, args=(rx, session, sink, CallControls(jitter_depth=depth), stats, stop))
     t.start()
     try:
         packets = _packets(max(order) + 1)
