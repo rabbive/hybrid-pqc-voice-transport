@@ -78,14 +78,17 @@ class DelayLine:
                 heapq.heappop(self._heap)
                 try:
                     self._deliver(value)
+                    self._condition.notify_all()
                 except BaseException as error:
                     self._error = error
                     self._closed = True
                     self._heap.clear()
                     self._condition.notify_all()
 
-    def close(self):
+    def close(self, drain=False):
         with self._condition:
+            while drain and self._heap and self._error is None:
+                self._condition.wait()
             self._closed = True
             self._heap.clear()
             self._condition.notify_all()

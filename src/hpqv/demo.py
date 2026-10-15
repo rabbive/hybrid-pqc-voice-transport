@@ -240,11 +240,11 @@ def _rms(pcm: bytes) -> float:
     return min(1.0, (total / len(samples)) ** 0.5 / 32768.0)
 
 
-def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
+def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event, seed=None):
     ring = Keyring.of(session)
     codec = OpusCodec()
     seq = 0
-    loss = LossModel()
+    loss = LossModel(seed)
 
     def deliver(dg):
         udp_sock.sendto(dg, dest)
@@ -252,7 +252,7 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
             stats.sent += 1
             stats.max_datagram = max(stats.max_datagram, len(dg))
 
-    delay_line = DelayLine(deliver)
+    delay_line = DelayLine(deliver, seed=None if seed is None else seed + 1)
     last_fec, last_bitrate = True, 0
     try:
         for pcm in source.frames():
@@ -278,23 +278,24 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
                 seq += 1
                 continue
             dg = ring.seal(seq, opus)
-            delay_line.send(dg, controls.get("delay_ms"), controls.get("jitter_ms"))
+            delay_ms, jitter_ms = controls.get("delay_ms"), controls.get("jitter_ms")
+            delay_line.send(dg, delay_ms, jitter_ms)
             seq += 1
     finally:
         try:
-            delay_line.close()
+            delay_line.close(drain=True)
         finally:
             stop_event.set()
 
 
-def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
+def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event, seed=None):
     from hpqv.jitter import JitterBuffer
     from hpqv.playout import Playout
     ring = Keyring.of(session)
     codec = OpusCodec()
     jb = JitterBuffer(depth=controls.get("jitter_depth"))
     playout = Playout(codec)
-    loss = LossModel()
+    loss = LossModel(seed)
     udp_sock.settimeout(0.5)
 
     def play(seq, opus):
@@ -308,10 +309,17 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
             if frames:               # Playout drops late/duplicate packets
                 stats.rx_level = _rms(frames[-1])
 
-    while not stop_event.is_set():
+    drain_deadline = None
+    while True:
+        if stop_event.is_set():
+            drain_deadline = drain_deadline or time.monotonic() + 0.5
+            if time.monotonic() >= drain_deadline:
+                break
         try:
             dg, _addr = udp_sock.recvfrom(2048)
         except socket.timeout:
+            if stop_event.is_set():
+                break
             continue
         except OSError:
             break
@@ -350,7 +358,8 @@ def _status_loop(stats, controls, stop_event):
 
 
 def _run_call(sock_tcp, udp_sock, dest, session, args,
-              stats=None, controls=None, stop_event=None, call_handle=None):
+              stats=None, controls=None, stop_event=None, call_handle=None,
+              rng_seed=None, quiet=False):
     """Run a call. The GUI passes in its own stats/controls/stop_event so it can
     watch the counters and turn the knobs while the call is live, and a
     call_handle to rotate keys or hang up. Either side ending ends both."""
@@ -363,18 +372,20 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     call_handle = call_handle if call_handle is not None else CallHandle()
     ring = call_handle.start(sock_tcp, session, stats, stop_event)
 
-    if controls.get("loss_pct") > 0:
+    if controls.get("loss_pct") > 0 and not quiet:
         print(f"loss injection active: dropping {controls.get('loss_pct')}% of outgoing packets")
 
-    status_thread = threading.Thread(target=_status_loop, args=(stats, controls, stop_event))
+    status_thread = None if quiet else threading.Thread(
+        target=_status_loop, args=(stats, controls, stop_event))
     recv_thread = threading.Thread(
         target=_receiver_loop,
-        args=(udp_sock, ring, sink, controls, stats, stop_event))
-    status_thread.start()
+        args=(udp_sock, ring, sink, controls, stats, stop_event, rng_seed))
+    if status_thread is not None:
+        status_thread.start()
     recv_thread.start()
 
     try:
-        _sender_loop(udp_sock, dest, ring, source, controls, stats, stop_event)
+        _sender_loop(udp_sock, dest, ring, source, controls, stats, stop_event, rng_seed)
         if args.input == "file":
             # let receiver drain remaining in-flight datagrams
             time.sleep(0.5)
@@ -382,12 +393,14 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
         stop_event.set()
         call_handle.finish()
         recv_thread.join(timeout=2)
-        status_thread.join(timeout=2)
+        if status_thread is not None:
+            status_thread.join(timeout=2)
         source.close()
         sink.close()
 
     sent, received, dropped, recovered = stats.snapshot()
-    print(f"call ended: sent={sent} received={received} dropped={dropped} recovered={recovered}")
+    if not quiet:
+        print(f"call ended: sent={sent} received={received} dropped={dropped} recovered={recovered}")
 
 
 class _CountingSocket:
