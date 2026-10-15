@@ -8,8 +8,9 @@ MAX_GAP = 50          # frames (1 s): a stall is not worth a second of fake audi
 
 
 class Playout:
-    def __init__(self, codec):
+    def __init__(self, codec, repair="fec"):
         self.codec = codec
+        self.repair = repair
         self.next_seq = None
         # Frames missing at playout time (lost or arrived too late), rebuilt
         # from FEC / concealed by PLC. Can exceed datagrams actually lost.
@@ -22,12 +23,24 @@ class Playout:
             return []                # late or duplicate: already played or rebuilt
         out = []
         gap = 0 if self.next_seq is None else seq - self.next_seq
+        decoded_current = False
         if 0 < gap <= MAX_GAP:
-            for _ in range(gap - 1):
-                out.append(self.codec.conceal())
-                self.concealed += 1
-            out.append(self.codec.decode(opus, decode_fec=True))
-            self.recovered += 1
-        out.append(self.codec.decode(opus))
+            if self.repair == "silence":
+                current = self.codec.decode(opus)
+                out.extend([bytes(len(current))] * gap)
+                self.concealed += gap
+                out.append(current)
+                decoded_current = True
+            elif self.repair == "plc":
+                out.extend(self.codec.conceal() for _ in range(gap))
+                self.concealed += gap
+            else:
+                for _ in range(gap - 1):
+                    out.append(self.codec.conceal())
+                    self.concealed += 1
+                out.append(self.codec.decode(opus, decode_fec=True))
+                self.recovered += 1
+        if not decoded_current:
+            out.append(self.codec.decode(opus))
         self.next_seq = seq + 1
         return out

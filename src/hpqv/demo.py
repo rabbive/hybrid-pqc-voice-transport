@@ -1,7 +1,6 @@
 """Live two-peer voice demo: real PQC handshake + real-time UDP voice, mic/speaker or file I/O."""
 import argparse
 import json
-import random
 import socket
 import struct
 import sys
@@ -10,9 +9,10 @@ import time
 import wave
 
 from hpqv import control, handshake as h, packet
-from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS
+from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS, _encoder_set
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
+from hpqv.impair import DelayLine, LossModel
 from hpqv.keyring import Keyring
 
 STATUS_INTERVAL = 1.0
@@ -244,6 +244,16 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
     ring = Keyring.of(session)
     codec = OpusCodec()
     seq = 0
+    loss = LossModel()
+
+    def deliver(dg):
+        udp_sock.sendto(dg, dest)
+        with stats.lock:
+            stats.sent += 1
+            stats.max_datagram = max(stats.max_datagram, len(dg))
+
+    delay_line = DelayLine(deliver)
+    last_fec, last_bitrate = True, 0
     try:
         for pcm in source.frames():
             if stop_event.is_set():
@@ -251,20 +261,30 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
             level = _rms(pcm)
             with stats.lock:
                 stats.tx_level = level
+            fec = controls.get("fec")
+            if fec != last_fec:
+                _encoder_set(codec.enc, 4012, int(fec))
+                _encoder_set(codec.enc, 4014, 10 if fec else 0)
+                last_fec = fec
+            bitrate = controls.get("bitrate")
+            if bitrate != last_bitrate:
+                _encoder_set(codec.enc, 4002, bitrate or -1000)
+                last_bitrate = bitrate
             opus = codec.encode(pcm)     # encode first: a real loss happens after the encoder
             drop_pct = controls.get("loss_pct")   # re-read every frame: changeable mid-call
-            if drop_pct > 0 and random.random() * 100 < drop_pct:
+            if loss.drop(drop_pct, controls.get("loss_model"), controls.get("burst_len")):
                 with stats.lock:
                     stats.dropped += 1
                 seq += 1
                 continue
             dg = ring.seal(seq, opus)
-            udp_sock.sendto(dg, dest)
-            with stats.lock:
-                stats.sent += 1
+            delay_line.send(dg, controls.get("delay_ms"), controls.get("jitter_ms"))
             seq += 1
     finally:
-        stop_event.set()
+        try:
+            delay_line.close()
+        finally:
+            stop_event.set()
 
 
 def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
@@ -274,6 +294,7 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
     codec = OpusCodec()
     jb = JitterBuffer(depth=controls.get("jitter_depth"))
     playout = Playout(codec)
+    loss = LossModel()
     udp_sock.settimeout(0.5)
 
     def play(seq, opus):
@@ -298,13 +319,24 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
             seq, _flags, opus = ring.open_(dg)
         except Exception:
             continue
-        jb.push(seq, opus)
         with stats.lock:
             stats.received += 1
+        if loss.drop(controls.get("incoming_loss_pct")):
+            with stats.lock:
+                stats.incoming_dropped += 1
+            continue
+        jb.depth = controls.get("jitter_depth")
+        if playout.next_seq is not None and seq < playout.next_seq:
+            with stats.lock:
+                stats.late += 1
+            continue
+        jb.push(seq, opus)
         popped = jb.pop()
         if popped is not None:
+            playout.repair = controls.get("repair")
             play(*popped)
     for popped in jb.flush():
+        playout.repair = controls.get("repair")
         play(*popped)
 
 

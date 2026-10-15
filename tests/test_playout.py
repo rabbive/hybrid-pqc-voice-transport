@@ -119,6 +119,37 @@ def test_gap_calls_codec_in_exact_order():
     ]
 
 
+@pytest.mark.parametrize("repair, expected_calls, expected_pcm", [
+    ("silence", [("decode", b"p10", False), ("decode", b"p14", False)],
+     [b"pcm", bytes(3), bytes(3), bytes(3), b"pcm"]),
+    ("plc", [("decode", b"p10", False), ("conceal",), ("conceal",),
+              ("conceal",), ("decode", b"p14", False)],
+     [b"pcm", b"plc", b"plc", b"plc", b"pcm"]),
+    ("fec", [("decode", b"p10", False), ("conceal",), ("conceal",),
+              ("decode", b"p14", True), ("decode", b"p14", False)],
+     [b"pcm", b"plc", b"plc", b"fec", b"pcm"]),
+])
+def test_repair_modes_define_gap_audio_and_counters(repair, expected_calls, expected_pcm):
+    calls = []
+
+    class RecordingCodec:
+        def decode(self, data, decode_fec=False):
+            calls.append(("decode", data, decode_fec))
+            return b"fec" if decode_fec else b"pcm"
+
+        def conceal(self):
+            calls.append(("conceal",))
+            return b"plc"
+
+    playout = Playout(RecordingCodec(), repair=repair)
+    out = playout.frames(10, b"p10") + playout.frames(14, b"p14")
+    assert calls == expected_calls
+    assert out == expected_pcm
+    assert (playout.recovered, playout.concealed) == {
+        "silence": (0, 3), "plc": (0, 3), "fec": (1, 2)
+    }[repair]
+
+
 def test_late_or_duplicate_packet_is_dropped_without_touching_the_decoder():
     calls = []
 
@@ -231,9 +262,88 @@ def test_receiver_loop_recovers_a_dropped_datagram():
     assert len(sink.frames) == 12
 
 
+def test_receiver_counts_all_incoming_loss_and_plays_nothing():
+    key, send_prefix, _ = _session()
+    session = (key, None, send_prefix)
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    class Sink:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, pcm):
+            self.frames.append(pcm)
+
+    sink, stats, stop = Sink(), Stats(), threading.Event()
+    controls = CallControls(incoming_loss_pct=100, jitter_depth=1)
+    thread = threading.Thread(target=_receiver_loop,
+                              args=(rx, session, sink, controls, stats, stop))
+    thread.start()
+    try:
+        for seq, opus in enumerate(_packets(5)):
+            tx.sendto(packet.seal(key, send_prefix, seq, opus), rx.getsockname())
+        for _ in range(100):
+            if stats.incoming_dropped == 5:
+                break
+            threading.Event().wait(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+        tx.close()
+        rx.close()
+    assert stats.incoming_dropped == 5
+    assert sink.frames == []
+
+
+def test_receiver_applies_jitter_depth_change_while_running():
+    key, send_prefix, _ = _session()
+    session = (key, None, send_prefix)
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    class Sink:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, pcm):
+            self.frames.append(pcm)
+
+    sink, stats, stop = Sink(), Stats(), threading.Event()
+    controls = CallControls(jitter_depth=50)
+    thread = threading.Thread(target=_receiver_loop,
+                              args=(rx, session, sink, controls, stats, stop))
+    thread.start()
+    try:
+        packets = _packets(4)
+        for seq in range(2):
+            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+        for _ in range(100):
+            if stats.snapshot()[1] == 2:
+                break
+            threading.Event().wait(0.01)
+        assert sink.frames == []
+        controls.set(jitter_depth=1)
+        for seq in (2, 3):
+            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+        for _ in range(100):
+            if len(sink.frames) >= 2:
+                break
+            threading.Event().wait(0.01)
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+        tx.close()
+        rx.close()
+    assert len(sink.frames) >= 2
+
+
 def test_recovered_counts_frames_missing_at_playout_not_lost_datagrams():
     """Depth 1, packets 4,6,5: 5 was missing when 6 played, so it is rebuilt from
     FEC and the real (late) 5 is discarded. recovered may therefore exceed dropped."""
     stats, sink = _receive([0, 1, 2, 3, 4, 6, 5], depth=1)
     assert stats.snapshot()[3] == 1          # 5 rebuilt via FEC
+    assert stats.as_dict()["late"] == 1
     assert len(sink.frames) == 7             # seqs 0..6, 5 exactly once
