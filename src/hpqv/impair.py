@@ -11,6 +11,18 @@ class LossModel:
         self._bad = False
         self._model = None
 
+    @staticmethod
+    def effective_loss_pct(loss_pct, model="random", burst_len=3):
+        """Return the achievable target; burst mode tops out at 100*B/(B+1)%.
+
+        A 100% request remains an explicit drop-everything setting.
+        """
+        if model == "random" or loss_pct <= 0 or loss_pct >= 100:
+            return loss_pct
+        if model != "burst":
+            raise ValueError(f"unknown loss model: {model}")
+        return min(loss_pct, 100 * burst_len / (burst_len + 1))
+
     def drop(self, loss_pct, model="random", burst_len=3):
         if loss_pct <= 0:
             self._bad = False
@@ -26,8 +38,10 @@ class LossModel:
         if self._model != model:
             self._bad = False
             self._model = model
+        loss_pct = self.effective_loss_pct(loss_pct, model, burst_len)
         recovery = 1 / burst_len
-        start = min(1, loss_pct / 100 * recovery / (1 - loss_pct / 100))
+        target = loss_pct / 100
+        start = min(1, target * recovery / (1 - target))
         if self._bad:
             if self._rng.random() < recovery:
                 self._bad = False

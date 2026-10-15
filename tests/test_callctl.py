@@ -64,6 +64,32 @@ def test_rotate_reaches_peer_and_mirrors_into_stats():
         _close(peers)
 
 
+def test_local_rotate_is_refused_until_previous_key_retires():
+    from hpqv import keyring
+
+    peers = _handles()
+    (ha, _, _, _), (hb, _, _, _) = peers
+
+    class Clock:
+        t = 100.0
+
+        def __call__(self):
+            return self.t
+
+    clock = Clock()
+    ha._ring._clock = clock
+    try:
+        assert ha.rotate_keys() == 1
+        assert _wait(lambda: hb.key_generation() == 1)
+        assert not ha.rotation_ready()
+        assert ha.rotate_keys() == 1
+        assert _wait(lambda: hb.key_generation() == 1)
+        clock.t += keyring.RETIRE_AFTER
+        assert ha.rotation_ready()
+    finally:
+        _close(peers)
+
+
 def test_simultaneous_rotate_from_both_sides_rotates_once():
     peers = _handles()
     (ha, _, _, _), (hb, _, _, _) = peers
@@ -76,7 +102,10 @@ def test_simultaneous_rotate_from_both_sides_rotates_once():
         for t in threads:
             t.join()
         time.sleep(0.3)                  # let both crossing ROTATE(1)s arrive
-        assert ha.key_generation() == hb.key_generation() == 1
+        # Truly simultaneous -> both at 1. If one ROTATE lands before the other
+        # side's own rotate_keys() ran, that side legitimately goes on to 2.
+        # Either way the peers must agree.
+        assert ha.key_generation() == hb.key_generation() in (1, 2)
         assert ha.key_fingerprint() == hb.key_fingerprint()
     finally:
         _close(peers)

@@ -1,21 +1,18 @@
 """Per-call voice keys across live rotations (ADR-0004).
 
-Header flags bit 0 carries the sender's key-generation parity. The receiver
-holds the current generation and, for a short window, the previous one, and
-decrypts with exactly the key the parity names: one AEAD attempt per datagram,
-so a failed decrypt never tells anyone which other key would have worked.
+Header flags bits 0-1 carry the low two bits of the key generation. The
+receiver retains every unexpired generation and makes one AEAD attempt.
 """
 import hashlib
 import threading
 import time
 
 from hpqv import packet, session as session_mod
+from hpqv.controls import _RANGES
 
-# The previous key is retired on a timer, not on the first current-generation
-# packet: with the delay/jitter knobs, datagrams reorder, so old-generation
-# packets legitimately arrive after new ones. 3 s covers the largest one-way
-# delay the controls allow (delay_ms 2000 + jitter_ms 1000).
-RETIRE_AFTER = 3.0
+# The previous key can still be in the DelayLine when the peer processes the
+# rotation; include the largest configured delay, jitter, and one control RTT.
+RETIRE_AFTER = (_RANGES["delay_ms"][1] + _RANGES["jitter_ms"][1]) / 1000 + 1
 
 
 class Keyring:
@@ -25,8 +22,8 @@ class Keyring:
         self._retire_after = retire_after
         self._gen = 0
         self._cur = session                  # (key, send_prefix, recv_prefix)
-        self._prev = None
-        self._prev_until = 0.0
+        self._keys = {0: session}
+        self._expires = {}
 
     @classmethod
     def of(cls, session_or_ring):
@@ -43,25 +40,30 @@ class Keyring:
         with self._lock:
             return hashlib.sha256(self._cur[0]).hexdigest()[:8]
 
-    def seal(self, seq, frame) -> bytes:
+    def seal(self, seq, frame, extra_flags=0) -> bytes:
+        """`extra_flags` sets header bits 2-7; bits 0-1 always stay the keyring's."""
         with self._lock:
             key, send_prefix, _ = self._cur
-            parity = self._gen & 1
-        return packet.seal(key, send_prefix, seq, frame, flags=parity)
+            generation = self._gen & 0x3
+        return packet.seal(key, send_prefix, seq, frame, flags=generation | (extra_flags & ~0x03))
+
+    def rotation_ready(self) -> bool:
+        with self._lock:
+            self._purge_expired()
+            return len(self._keys) == 1
 
     def open_(self, datagram):
         if len(datagram) < 11:
             raise ValueError("short datagram")
-        parity = datagram[10] & 1        # header is AAD: flipping it fails the tag
+        generation = datagram[10] & 0x3  # header is AAD: changing it fails the tag
         with self._lock:
-            if self._prev is not None and self._clock() >= self._prev_until:
-                self._prev = None
-            if parity == self._gen & 1:
-                sess = self._cur
-            elif self._prev is not None:
-                sess = self._prev
-            else:
+            self._purge_expired()
+            matches = [sess for gen, sess in self._keys.items() if gen & 0x3 == generation]
+            if not matches:
                 raise ValueError("no key for this generation")
+            if len(matches) != 1:
+                raise ValueError("ambiguous key generation")
+            sess = matches[0]
         key, _, recv_prefix = sess
         return packet.open_(key, recv_prefix, datagram)
 
@@ -69,6 +71,7 @@ class Keyring:
         """Peer said ROTATE(generation). Only current + 1 moves the ring, so a
         crossing ROTATE for a generation we already reached is a no-op."""
         with self._lock:
+            self._purge_expired()
             if generation != self._gen + 1:
                 return False
             self._advance()
@@ -77,10 +80,21 @@ class Keyring:
     def rotate_next(self) -> int:
         """Local press: rotate now and return the generation to announce."""
         with self._lock:
+            self._purge_expired()
+            if len(self._keys) != 1:
+                return self._gen
             self._advance()
             return self._gen
 
     def _advance(self):
-        self._prev, self._cur = self._cur, session_mod.rotate(self._cur)
-        self._prev_until = self._clock() + self._retire_after
+        self._expires[self._gen] = self._clock() + self._retire_after
         self._gen += 1
+        self._cur = session_mod.rotate(self._cur)
+        self._keys[self._gen] = self._cur
+
+    def _purge_expired(self):
+        now = self._clock()
+        for gen, expires in tuple(self._expires.items()):
+            if now >= expires:
+                del self._expires[gen]
+                del self._keys[gen]

@@ -35,18 +35,38 @@ Rotation rules (ADR-0004, `hpqv.keyring` / `hpqv.callctl`):
   generation has a fresh key and fresh prefixes, so prefix ‖ seq under the new
   key never repeats a (key, nonce) pair, and the jitter buffer keeps one
   monotonic sequence space.
-- The receiver keeps the previous generation's key for 3 s after rotating
-  (the largest one-way delay + jitter the demo controls allow), then deletes it.
+- Each retired generation's key stays available for 4 s. This is derived from
+  the largest delay and jitter values in `controls._RANGES`, plus 1 s for a
+  control round-trip. Local rotation waits until every older key has expired;
+  a peer's next generation is applied immediately while older keys remain
+  available for in-flight datagrams.
 
 ## Voice datagram (over UDP, ≤1200B total, DF set)
 header ‖ ciphertext‖tag
 - header: version(1B) ‖ type(1B) ‖ seq(8B, big-endian) ‖ flags(1B)  = 11 bytes
-- flags bit 0 = key generation parity (generation & 1). The receiver decrypts
-  with the one key that parity names: the current generation, or the previous
-  one while it is still kept. One AEAD attempt per datagram, never a try-all.
-  The header is AAD, so a flipped parity bit fails authentication. Bits 1–7 are 0.
+- flags bits 0–1 = key generation modulo 4. The receiver decrypts with the one
+  retained key named by those bits. Up to three generations can be live when a
+  peer rotates again before an older key retires. One AEAD attempt per
+  datagram, never a try-all. The header is AAD, so changing the generation tag
+  fails authentication. Bits 2–7 are 0.
 - nonce = nonce_prefix(4B) ‖ seq(8B)  → 12B ChaCha20-Poly1305 nonce
 - ciphertext = ChaCha20Poly1305(key, nonce, opus_frame, aad=header); includes 16B tag
+
+### Flags bit 2: encoder FEC hint (`packet.FLAG_FEC = 0x04`)
+
+Exception to "unused bits are 0" above. Bits 0–1 belong to the keyring;
+`Keyring.seal(extra_flags=...)` masks them out of anything else it is given.
+
+- Set when the sender's Opus encoder had in-band FEC on when it coded this frame,
+  so the packet *may* carry LBRR data for the previous frame. A hint, not a
+  guarantee: CELT-only packets never carry LBRR, and SILK only adds it when it
+  judges it worthwhile.
+- The receiver asks libopus (`opus_packet_has_lbrr`, libopus ≥ 1.5) when it is
+  available and uses this bit only as a fallback (e.g. Ubuntu 24.04's libopus
+  1.4), still treating CELT-only TOC configs (16–31) as having no LBRR.
+- A gap frame counts as FEC-recovered only when the next packet has (or, in the
+  fallback, may have) LBRR; otherwise it is concealed by PLC and counted as such.
+- Covered by the AEAD tag like the rest of the header.
 
 ## Runtime notes
 

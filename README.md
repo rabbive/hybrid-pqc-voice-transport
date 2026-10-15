@@ -86,10 +86,30 @@ python -m hpqv.gui
 ```
 
 Pick the identity file, choose *Listen* on one machine and *Call* on the other,
-press Start. Then **drag the packet-loss slider during the call**: loss is
-injected live, so the audience hears the transport degrade and recover while the
-dropped and recovered counters update — no hanging up. The receiver uses Opus
-in-band FEC for recoverable gaps and Opus packet-loss concealment for longer gaps.
+press Start. Every control changes the running call, and every effect shows up in
+the live stats and the 60 s graph on the right — no hanging up. The window is a
+notebook of controls (left) beside always-visible stats and graph (right), sized
+for a 1366×768 laptop or a projector:
+
+- **Call tab** — connection and identity; input source (*Microphone* or a *WAV
+  file* picked from disk); *Record received audio* to a WAV; and the **handshake
+  panel**: ML-KEM / ML-DSA names, HELLO / ACCEPT / total bytes, TCP transport,
+  measured handshake time, "UDP fragments: 0" and the largest datagram sent
+  against the 1200 B cap.
+- **Network tab** — presets (*Clean*, *Bad Wi-Fi*, *Burst loss*, *Congested*) that
+  move every slider below; repair mode (*Silence* / *Concealment only* /
+  *FEC + concealment*) and an *Encoder FEC* checkbox; outgoing loss 0–50 %, loss
+  model (*Random* / *Burst* with mean burst length 1–10), delay 0–500 ms, jitter
+  0–200 ms, incoming loss 0–50 %; jitter-buffer depth 1–15 frames (shown in ms)
+  and Opus bitrate (Auto, 8–64 kbit/s).
+- **Security tab** — *Rotate keys* re-keys both sides mid-call; the key generation
+  and fingerprint update live.
+- **Live stats and graph** — sent, received, dropped, incoming dropped, late,
+  recovered (FEC), concealed, measured and residual loss %, and live MOS; the graph
+  plots loss, residual loss, recovered/s and MOS over the last 60 s.
+- **Export session…** writes the call's `timeline.csv`, `summary.md` and charts to
+  a folder you pick (also after hanging up). *Hang up* ends the call on both sides;
+  a peer hang-up updates the status line.
 
 **CLI**, same machinery:
 
