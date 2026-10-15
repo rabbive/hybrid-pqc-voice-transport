@@ -21,7 +21,7 @@ DEFAULTS = {
 _RANGES = {
     "loss_pct": (0.0, 100.0), "incoming_loss_pct": (0.0, 100.0),
     "burst_len": (1.0, 50.0), "delay_ms": (0.0, 2000.0), "jitter_ms": (0.0, 1000.0),
-    "bitrate": (0, 128000), "jitter_depth": (1, 50),
+    "bitrate": (0, 512000), "jitter_depth": (1, 50),
 }
 _CHOICES = {"loss_model": ("random", "burst"), "repair": ("silence", "plc", "fec")}
 
@@ -53,6 +53,8 @@ class CallControls:
             else:
                 lo, hi = _RANGES[name]
                 value = type(DEFAULTS[name])(max(lo, min(hi, value)))
+                if name == "bitrate" and value:
+                    value = max(500, value)
             clean[name] = value
         with self._lock:
             self._v.update(clean)
