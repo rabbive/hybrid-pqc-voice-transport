@@ -42,9 +42,9 @@ Owns `src/hpqv/impair.py` (new), `_sender_loop`, `_receiver_loop`, `playout.py`,
 Owns `src/hpqv/keyring.py`, `src/hpqv/callctl.py` (new), `packet.py` flags use,
 the `packet.seal`/`open_` call sites in the loops (coordinate: only those lines),
 and the TCP control channel during a call.
-- Packet header `flags` bit 0 = key generation parity. Receiver keeps current and
-  previous generation keys and picks by parity, so in-flight packets across a
-  rotation still decrypt. Nonce stays prefix ‖ seq; each generation has its own key
+- Packet header `flags` bits 0–1 = key generation mod 4 (bit 2 = encoder-FEC marker;
+  ADR-0004, wire-format.md). Receiver keeps the retained generation keys and picks
+  by those bits, so in-flight packets across a rotation still decrypt. Nonce stays prefix ‖ seq; each generation has its own key
   and prefixes via `session.rotate`, so (key, nonce) never repeats.
 - `MSG_KEY_ROTATE` payload = u32 new generation. A peer rotates only when
   generation == current + 1, so simultaneous presses rotate exactly once.
