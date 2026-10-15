@@ -38,15 +38,40 @@ KEM encapsulation and decapsulation, and uses one deadline for all transports.
 
 ## Results
 
-Fill this table from the container run.
+Run on 2026-10-15 in the `hpqv-eval` container (Linux arm64, loopback MTU pinned
+to 1500, i.i.d. `tc netem` loss), 100 attempts per cell, one common 3 s deadline.
+HELLO is 6,446 B and ACCEPT 4,398 B, so each UDP attempt is 8 IP fragments.
+Source: `results/full_handshake.csv`, figure `results/full_handshake.png`.
 
-| Loss | TCP success | UDP naive success | UDP retry success |
-|---:|---:|---:|---:|
-| 0% | — | — | — |
-| 5% | — | — | — |
-| 10% | — | — | — |
-| 20% | — | — | — |
-| 30% | — | — | — |
+| Loss | TCP success | UDP naive success | (1−p)^8 prediction | UDP retry success |
+|---:|---:|---:|---:|---:|
+| 0% | 100% (1.0 ms) | 100% (3.4 ms) | 100% | 100% (3.1 ms) |
+| 5% | 100% (1.2 ms) | 72% (3.5 ms) | 66% | 100% (4.3 ms) |
+| 10% | 99% (2.2 ms) | 44% (3.5 ms) | 43% | 100% (257 ms) |
+| 20% | 84% (4.2 ms) | 18% (2.8 ms) | 17% | 86% (770 ms) |
+| 30% | 56% (1,017 ms) | 6% (4.9 ms) | 6% | 52% (1,269 ms) |
+
+Times in brackets are the median over successful attempts only.
+
+What this supports:
+
+- Sending the real handshake as one-shot UDP datagrams fails the way fragment
+  arithmetic predicts: success tracks (1−p)^8 within sampling error at every level.
+- Carrying the same handshake over TCP completes 84% of the time at 20% loss and
+  56% at 30%, against 18% and 6% for naive UDP, under the same 3 s budget.
+- A UDP design that retransmits the whole HELLO every 250 ms performs about as
+  well as TCP at this deadline (86% vs 84% at 20%; 52% vs 56% at 30%). The gain
+  over naive UDP comes from retransmission, not from TCP specifically.
+
+What it does not support:
+
+- It does not show TCP beats every reliable-UDP design. The retry baseline
+  matches it here, at the cost of resending all 6.4 KB (8 fragments) on any
+  single fragment loss and of depending on IP fragments reaching the peer, which
+  this loopback test does not challenge.
+- These figures are lower than the earlier synthetic experiment (99% at 20%,
+  83% at 30%) because that one used a 20 s TCP timeout and a random payload.
+  Quote these numbers when the claim is about completing a real call setup.
 
 ## Reproduce
 
