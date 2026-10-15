@@ -141,6 +141,7 @@ class DemoWindow:
         a.identity_file = identity_file
         a.input, a.wav = "mic", None
         a.output, a.out_wav = "speaker", None
+        a.record_wav = None
         a.drop_pct = self.controls.get("loss_pct")
         a.seconds = 3600          # run until Hang up
         a.jitter_depth = 3

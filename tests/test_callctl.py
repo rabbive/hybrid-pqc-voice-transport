@@ -158,7 +158,7 @@ def test_live_call_rotates_mid_call_and_hang_up_ends_both(tmp_path):
                              ("listener", listener_tcp, "caller")):
         args = argparse.Namespace(input="file", wav=str(wav), seconds=8, output="file",
                                   out_wav=str(tmp_path / f"{role}.wav"),
-                                  drop_pct=0, jitter_depth=3)
+                                  drop_pct=0, jitter_depth=3, record_wav=None)
         handle, stats, stop = CallHandle(), Stats(), threading.Event()
         thread = threading.Thread(target=demo._run_call, args=(
             tcp, udp[role], udp[other].getsockname(), sessions[role], args),

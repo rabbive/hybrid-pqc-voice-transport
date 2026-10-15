@@ -9,7 +9,7 @@ import threading
 import time
 import wave
 
-from hpqv import control, handshake as h
+from hpqv import control, handshake as h, packet
 from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
@@ -323,7 +323,7 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     watch the counters and turn the knobs while the call is live, and a
     call_handle to rotate keys or hang up. Either side ending ends both."""
     source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
-    sink = FrameSink(args.output, wav_path=args.out_wav)
+    sink = FrameSink(args.output, wav_path=args.out_wav, record_path=args.record_wav)
     stats = stats if stats is not None else Stats()
     controls = controls if controls is not None else CallControls(
         loss_pct=args.drop_pct, jitter_depth=args.jitter_depth)
@@ -481,6 +481,7 @@ def _add_common_call_args(p):
     p.add_argument("--drop-pct", type=float, default=0, help="%% of outgoing packets to randomly drop")
     p.add_argument("--seconds", type=int, default=30, help="call duration for mic input")
     p.add_argument("--jitter-depth", type=int, default=3)
+    p.add_argument("--record-wav", help="also record received audio to this WAV")
 
 
 def main(argv=None):
