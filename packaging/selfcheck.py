@@ -64,7 +64,6 @@ def telemetry_export():
 
 
 def rotate_call():
-    import argparse as ap
     from hpqv import control, demo, handshake as h
     from hpqv.audio import FS
     from hpqv.callctl import CallHandle
@@ -96,9 +95,8 @@ def rotate_call():
         peers = {}
         for role, tcp, other in (("caller", caller_tcp, "listener"),
                                  ("listener", listener_tcp, "caller")):
-            args = ap.Namespace(input="file", wav=str(tmp / "tone.wav"), seconds=5,
-                                output="file", out_wav=str(tmp / f"{role}.wav"),
-                                drop_pct=0, jitter_depth=3, record_wav=None)
+            args = demo.call_args(input="file", wav=str(tmp / "tone.wav"), seconds=5,
+                                  output="file", out_wav=str(tmp / f"{role}.wav"))
             handle, stats, stop = CallHandle(), demo.Stats(), threading.Event()
             thread = threading.Thread(target=demo._run_call, args=(
                 tcp, udp[role], udp[other].getsockname(), sessions[role], args),

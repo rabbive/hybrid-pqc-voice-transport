@@ -140,18 +140,12 @@ class DemoWindow:
 
     def _args(self, cfg):
         """The same argument object the CLI builds, so one code path serves both."""
-        class A:
-            pass
-        a = A()
-        a.identity_file = cfg["identity"]
-        a.input, a.wav = cfg["input"], cfg["wav"]
-        a.output, a.out_wav = "speaker", None
-        a.record_wav = cfg["record_wav"]
-        a.drop_pct = self.controls.get("loss_pct")
-        a.seconds = MIC_SECONDS   # run until Hang up
-        a.loop = cfg["input"] == "file"   # a WAV restarts at EOF, so Hang up ends the call
-        a.jitter_depth = self.controls.get("jitter_depth")
-        return a
+        return demo.call_args(
+            identity_file=cfg["identity"], input=cfg["input"], wav=cfg["wav"],
+            record_wav=cfg["record_wav"], drop_pct=self.controls.get("loss_pct"),
+            seconds=MIC_SECONDS,                 # run until Hang up
+            loop=cfg["input"] == "file",         # a WAV restarts at EOF, so Hang up ends the call
+            jitter_depth=self.controls.get("jitter_depth"))
 
     def _start(self):
         if self.worker and self.worker.is_alive():

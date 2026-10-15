@@ -3,7 +3,6 @@
 The unit tests drive two CallHandles over a socketpair; the end-to-end test
 runs two full peers (TCP handshake + UDP voice from WAV files) in one process.
 """
-import argparse
 import math
 import socket
 import struct
@@ -185,9 +184,8 @@ def test_live_call_rotates_mid_call_and_hang_up_ends_both(tmp_path):
     peers = {}
     for role, tcp, other in (("caller", caller_tcp, "listener"),
                              ("listener", listener_tcp, "caller")):
-        args = argparse.Namespace(input="file", wav=str(wav), seconds=8, output="file",
-                                  out_wav=str(tmp_path / f"{role}.wav"),
-                                  drop_pct=0, jitter_depth=3, record_wav=None, loop=False)
+        args = demo.call_args(input="file", wav=str(wav), seconds=8, output="file",
+                              out_wav=str(tmp_path / f"{role}.wav"))
         handle, stats, stop = CallHandle(), Stats(), threading.Event()
         thread = threading.Thread(target=demo._run_call, args=(
             tcp, udp[role], udp[other].getsockname(), sessions[role], args),

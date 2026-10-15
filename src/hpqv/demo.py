@@ -607,6 +607,21 @@ def _add_common_call_args(p):
     p.add_argument("--record-wav", help="also record received audio to this WAV")
 
 
+def call_args(**overrides):
+    """Call args for code that starts a call without the CLI (GUI, frozen self-check, tests).
+
+    Built from the CLI parser's own defaults, so a new flag reaches every caller.
+    """
+    p = argparse.ArgumentParser()
+    _add_common_call_args(p)
+    args = p.parse_args([])
+    unknown = set(overrides) - set(vars(args))
+    if unknown:
+        raise TypeError(f"unknown call args: {sorted(unknown)}")
+    vars(args).update(overrides)
+    return args
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(prog="python -m hpqv.demo")
     sub = parser.add_subparsers(dest="command", required=True)

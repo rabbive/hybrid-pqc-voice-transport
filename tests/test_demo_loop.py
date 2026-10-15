@@ -65,3 +65,17 @@ def test_cli_loop_flag_reaches_the_frame_source(monkeypatch):
     except Stop:
         pass
     assert seen["loop"] is True
+
+
+def test_call_args_carries_every_cli_default_so_code_built_calls_cannot_drift():
+    # The GUI, the frozen self-check and tests build call args in code. Each new
+    # CLI flag (loop, record_wav) broke one of them until it was added by hand.
+    args = demo.call_args(input="file", wav="x.wav")
+    assert (args.input, args.wav, args.loop, args.record_wav) == ("file", "x.wav", False, None)
+    assert args.jitter_depth == 3 and args.output == "speaker"
+
+
+def test_call_args_rejects_unknown_names():
+    import pytest
+    with pytest.raises(TypeError):
+        demo.call_args(jiter_depth=3)
