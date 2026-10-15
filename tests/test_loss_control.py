@@ -120,3 +120,43 @@ def test_sender_encodes_every_frame_and_drops_only_the_datagram(monkeypatch):
     assert [packet.open_(key, send_prefix, dg)[0] for dg in sock.sent] == [0, 1, 2, 4, 5, 6, 7]
     sent, _rx, dropped, _rec = stats.snapshot()
     assert (sent, dropped) == (7, 1)
+    assert stats.max_datagram == max(map(len, sock.sent))
+
+
+def test_sender_applies_fec_and_bitrate_changes_in_sender_thread(monkeypatch):
+    import hpqv.demo as demo
+    from hpqv.audio import _encoder_get
+
+    observed = []
+
+    class SpyCodec(demo.OpusCodec):
+        def encode(self, pcm):
+            observed.append((_encoder_get(self.enc, 4013), _encoder_get(self.enc, 4015),
+                             _encoder_get(self.enc, 4003), threading.get_ident()))
+            return super().encode(pcm)
+
+    class FakeSock:
+        def sendto(self, dg, dest):
+            pass
+
+    class Source:
+        def __init__(self, controls):
+            self.controls = controls
+
+        def frames(self):
+            for i in range(4):
+                if i == 2:
+                    self.controls.set(fec=False, bitrate=24000)
+                yield FRAME
+
+    monkeypatch.setattr(demo, "OpusCodec", SpyCodec)
+    controls = CallControls()
+    sender_thread = threading.get_ident()
+    _sender_loop(FakeSock(), ("127.0.0.1", 9), _session(), Source(controls), controls,
+                 Stats(), threading.Event())
+
+    assert [(fec, loss) for fec, loss, _bitrate, _thread_id in observed] == [
+        (1, 10), (1, 10), (0, 0), (0, 0)]
+    assert observed[2][2] == observed[3][2] == 24000
+    assert all(thread_id == sender_thread
+               for _fec, _loss, _bitrate, thread_id in observed)
