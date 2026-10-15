@@ -88,7 +88,8 @@ python -m hpqv.gui
 Pick the identity file, choose *Listen* on one machine and *Call* on the other,
 press Start. Then **drag the packet-loss slider during the call**: loss is
 injected live, so the audience hears the transport degrade and recover while the
-dropped counter climbs — no hanging up.
+dropped and recovered counters update — no hanging up. The receiver uses Opus
+in-band FEC for recoverable gaps and Opus packet-loss concealment for longer gaps.
 
 **CLI**, same machinery:
 
@@ -110,7 +111,7 @@ instructions and troubleshooting: **[docs/DEMO.md](docs/DEMO.md)**.
 docker build -t hpqv-eval ./eval
 docker run --rm --cap-add=NET_ADMIN -v "$PWD":/work hpqv-eval bash -c \
   'cd /work && uv sync -q && uv run python scripts/run_eval.py'              # Track 2
-# also: scripts/run_ns3.py, scripts/run_handshake_survival.py, scripts/run_fec_recovery.py
+# also: scripts/run_ns3.py, scripts/run_handshake_survival.py, scripts/run_fec_recovery.py, scripts/run_full_handshake.py
 python scripts/render_tables.py    # refresh the tables in the docs afterwards
 ```
 
@@ -119,7 +120,7 @@ Outputs land in `results/` (committed, so the report can cite exact numbers).
 ## Layout
 
 ```
-src/hpqv/          handshake, control, packet, jitter, audio, udp, call, session, demo, gui
+src/hpqv/          handshake, control, packet, jitter, audio, playout (FEC/PLC), udp, call, session, demo, gui
 src/hpqv/eval/     MOS (ITU-T G.107), capture, stats, baselines, netem, runner, graphs
 ns3/               hpqv_sim.cc — the NS-3 secondary model (see ns3/README.md)
 eval/Dockerfile    the Linux evaluation environment
@@ -135,6 +136,7 @@ docs/              evaluation report, experiments, wire format, ADRs
 | [docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md) | Every test and result, method, limitations, metric glossary |
 | [docs/EXPERIMENT-handshake-survival.md](docs/EXPERIMENT-handshake-survival.md) | Does the handshake survive loss? |
 | [docs/EXPERIMENT-fec-recovery.md](docs/EXPERIMENT-fec-recovery.md) | Does Opus in-band FEC actually recover frames? |
+| [docs/EXPERIMENT-full-handshake.md](docs/EXPERIMENT-full-handshake.md) | Real authenticated handshake over TCP and one-datagram UDP under loss, with and without HELLO retry |
 | [docs/wire-format.md](docs/wire-format.md) | Byte layout of the handshake and voice datagrams |
 | [docs/DEMO.md](docs/DEMO.md) | Running the live call (GUI and CLI) |
 | [docs/REPORT.md](docs/REPORT.md) | IEEE-structured project report |
