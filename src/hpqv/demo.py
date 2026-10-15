@@ -16,6 +16,7 @@ from hpqv.impair import DelayLine, LossModel
 from hpqv.keyring import Keyring
 
 STATUS_INTERVAL = 1.0
+FRAME_MS = 1000 * FRAME_SAMPLES // FS     # 20
 
 
 def create_identity(path):
@@ -114,10 +115,19 @@ class FrameSink:
 
     `record_path` additionally tees every frame to a WAV, streamed to disk so a
     long call does not sit in memory.
+
+    With `controls`, speaker mode keeps at most jitter_depth + 2 frames queued
+    for the device and skips (and counts in stats.skipped) the rest. Otherwise a
+    PLC burst or a lowered delay leaves the call permanently that far behind,
+    because the device only ever plays at real time.
     """
 
-    def __init__(self, mode, wav_path=None, record_path=None):
+    def __init__(self, mode, wav_path=None, record_path=None,
+                 controls=None, stats=None, clock=time.monotonic):
         self.mode = mode
+        self._controls, self._stats, self._clock = controls, stats, clock
+        self._queued = 0.0           # frames handed to the speaker, not yet played
+        self._last_t = None
         self._frames = []
         self._stream = None
         self._closed = False
@@ -156,6 +166,11 @@ class FrameSink:
             # draining; writing to a torn-down PortAudio stream throws and dumps
             # a traceback over the demo. Dropping late frames is the right call.
             return
+        if self.mode == "speaker" and self._controls is not None and self._over_backlog():
+            if self._stats is not None:
+                with self._stats.lock:
+                    self._stats.skipped += 1
+            return           # skipped before the tee: the recording is what was heard
         if self._rec is not None:
             with self._rec_lock:
                 if self._rec is not None:
@@ -172,6 +187,23 @@ class FrameSink:
                 pass          # device hiccup or shutdown: never kill the call
         else:
             self._frames.append(pcm)
+
+    def _over_backlog(self):
+        """Wall-clock model of the device queue, which drains 50 frames/s.
+
+        ponytail: assumes the sound card clock matches time.monotonic; a ~50 ppm
+        drift is about 1 frame per 1000 s. Upgrade to stream.write_available if
+        a device ever drifts noticeably.
+        """
+        now = self._clock()
+        if self._last_t is not None:
+            drained = (now - self._last_t) * FS / FRAME_SAMPLES
+            self._queued = max(0.0, self._queued - drained)
+        self._last_t = now
+        if self._queued + 1 > self._controls.get("jitter_depth") + 2 + 1e-6:
+            return True
+        self._queued += 1
+        return False
 
     def close(self):
         self._closed = True          # stop accepting writes before tearing down
@@ -206,6 +238,16 @@ class Stats:
         self.concealed = 0
         self.late = 0                # arrived after their slot was played/repaired
         self.incoming_dropped = 0    # dropped on purpose by receiver-side loss
+        self.skipped = 0             # decoded frames not played to bound speaker latency
+        # Receiver's view of the PEER's stream (RxMeter). The sender advances seq
+        # on frames it drops, so the seq span is what the peer's encoder produced.
+        self.rx_expected = 0
+        self.rx_jitter_ms = 0.0      # RFC 3550 interarrival jitter estimate
+        # Transit = arrival time - seq * 20 ms, relative to the first packet.
+        # The clocks are not synced, so only differences between packets mean anything.
+        self.rx_transit_sum_ms = 0.0
+        self.rx_transit_n = 0
+        self.rx_transit_min_ms = 0.0
         self.max_datagram = 0        # largest UDP payload sent, bytes (cap: 1200)
         self.key_gen = 0             # live key-rotation generation
         self.handshake_ms = 0.0
@@ -225,6 +267,34 @@ class Stats:
     def levels(self):
         with self.lock:
             return self.tx_level, self.rx_level
+
+
+class RxMeter:
+    """Receiver-side measurement of the peer's stream, fed one authenticated
+    datagram at a time, in arrival order."""
+
+    def __init__(self, stats):
+        self._stats = stats
+        self._top = None             # highest seq seen
+        self._t0 = None              # first packet's transit: the zero point
+        self._last = None            # previous packet's relative transit
+
+    def arrive(self, seq, now):
+        transit = now * 1000.0 - seq * FRAME_MS
+        if self._t0 is None:
+            self._t0 = transit
+        transit -= self._t0
+        s = self._stats
+        with s.lock:
+            if self._top is None or seq > self._top:
+                s.rx_expected += 1 if self._top is None else seq - self._top
+                self._top = seq
+            if self._last is not None:
+                s.rx_jitter_ms += (abs(transit - self._last) - s.rx_jitter_ms) / 16
+            self._last = transit
+            s.rx_transit_sum_ms += transit
+            s.rx_transit_n += 1
+            s.rx_transit_min_ms = min(s.rx_transit_min_ms, transit)
 
 
 def _rms(pcm: bytes) -> float:
@@ -277,7 +347,7 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
                     stats.dropped += 1
                 seq += 1
                 continue
-            dg = ring.seal(seq, opus)
+            dg = ring.seal(seq, opus, extra_flags=packet.FLAG_FEC if fec else 0)
             delay_line.send(dg, controls.get("delay_ms"), controls.get("jitter_ms"))
             seq += 1
     finally:
@@ -295,11 +365,13 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
     jb = JitterBuffer(depth=controls.get("jitter_depth"))
     playout = Playout(codec)
     loss = LossModel()
+    meter = RxMeter(stats)
     udp_sock.settimeout(0.5)
 
-    def play(seq, opus):
+    def play(seq, item):
+        opus, fec_hint = item
         r0, c0 = playout.recovered, playout.concealed
-        frames = playout.frames(seq, opus)
+        frames = playout.frames(seq, opus, fec_hint)
         for pcm in frames:
             sink.write(pcm)
         with stats.lock:
@@ -314,13 +386,17 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
         except socket.timeout:
             continue
         except OSError:
+            stop_event.set()         # dead socket (e.g. Windows WSAECONNRESET): end the call
             break
         try:
-            seq, _flags, opus = ring.open_(dg)
+            seq, flags, opus = ring.open_(dg)
         except Exception:
             continue
         with stats.lock:
             stats.received += 1
+        # Before the simulated drop: those datagrams did cross the network, and
+        # counting them keeps 100 % incoming loss visible as 100 %, not 0/0.
+        meter.arrive(seq, time.monotonic())
         if loss.drop(controls.get("incoming_loss_pct")):
             with stats.lock:
                 stats.incoming_dropped += 1
@@ -330,9 +406,10 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
             with stats.lock:
                 stats.late += 1
             continue
-        jb.push(seq, opus)
-        popped = jb.pop()
-        if popped is not None:
+        jb.push(seq, (opus, bool(flags & packet.FLAG_FEC)))
+        # Pop until back under depth: after the depth is lowered mid-call a single
+        # pop per push would leave the old backlog (and its latency) in place.
+        while (popped := jb.pop()) is not None:
             playout.repair = controls.get("repair")
             play(*popped)
     for popped in jb.flush():
@@ -355,10 +432,11 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     watch the counters and turn the knobs while the call is live, and a
     call_handle to rotate keys or hang up. Either side ending ends both."""
     source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
-    sink = FrameSink(args.output, wav_path=args.out_wav, record_path=args.record_wav)
     stats = stats if stats is not None else Stats()
     controls = controls if controls is not None else CallControls(
         loss_pct=args.drop_pct, jitter_depth=args.jitter_depth)
+    sink = FrameSink(args.output, wav_path=args.out_wav, record_path=args.record_wav,
+                     controls=controls, stats=stats)
     stop_event = stop_event if stop_event is not None else threading.Event()
     call_handle = call_handle if call_handle is not None else CallHandle()
     ring = call_handle.start(sock_tcp, session, stats, stop_event)

@@ -43,11 +43,12 @@ class Keyring:
         with self._lock:
             return hashlib.sha256(self._cur[0]).hexdigest()[:8]
 
-    def seal(self, seq, frame) -> bytes:
+    def seal(self, seq, frame, extra_flags=0) -> bytes:
+        """`extra_flags` sets header bits 2-7; bits 0-1 always stay the keyring's."""
         with self._lock:
             key, send_prefix, _ = self._cur
             parity = self._gen & 1
-        return packet.seal(key, send_prefix, seq, frame, flags=parity)
+        return packet.seal(key, send_prefix, seq, frame, flags=parity | (extra_flags & ~0x03))
 
     def open_(self, datagram):
         if len(datagram) < 11:
