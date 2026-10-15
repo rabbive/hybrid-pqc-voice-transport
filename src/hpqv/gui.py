@@ -28,6 +28,7 @@ from hpqv import control, demo
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
 from hpqv.gui_graph import GraphCanvas, SERIES
+from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_wav)
 from hpqv.gui_network import NetworkPanel
 from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
                              StatsPanel)
@@ -36,6 +37,8 @@ from hpqv.telemetry import Telemetry
 POLL_MS = 200
 SAMPLE_S = 1.0           # telemetry cadence
 ACCEPT_TICK = 0.5        # how often a listening worker checks for Hang up
+MIC_SECONDS = 10 ** 7    # a mic call runs until Hang up; demo's default would end it
+CLOSE_JOIN_S = 3.0       # how long closing the window waits for the call to tear down
 
 
 class DemoWindow:
@@ -56,8 +59,12 @@ class DemoWindow:
         self.worker = None
         self._live = False                 # call connected: sample telemetry, allow rotate
         self._hung_up = False
-        self._t0 = self._last_sample = 0.0
+        self._closing = False
+        self._cc = CallClock(clock)        # graph time; freezes at hang-up
+        self._last_sample = 0.0
+        self._export_thread = None
         self._build()
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(POLL_MS, self._poll)
 
     def _style(self):
@@ -141,7 +148,7 @@ class DemoWindow:
         a.output, a.out_wav = "speaker", None
         a.record_wav = cfg["record_wav"]
         a.drop_pct = self.controls.get("loss_pct")
-        a.seconds = 3600          # run until Hang up (a WAV ends the call at EOF)
+        a.seconds = MIC_SECONDS   # run until Hang up (a WAV ends the call at EOF)
         a.jitter_depth = self.controls.get("jitter_depth")
         return a
 
@@ -156,6 +163,11 @@ class DemoWindow:
         except ValueError as exc:
             messagebox.showerror("Cannot start", str(exc))
             return
+        if cfg["input"] == "file":         # fail here, not as a worker error after connecting
+            err = validate_wav(cfg["wav"])
+            if err:
+                messagebox.showerror("Cannot start", err)
+                return
         cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle())
         self.stop_event, self.stats, self.call_handle = cfg["stop"], cfg["stats"], cfg["handle"]
         self._hung_up = False
@@ -173,7 +185,35 @@ class DemoWindow:
         self.stop_event.set()              # also frees a worker still waiting in accept()
         self.state_label.config(text="hanging up…")
 
+    def _on_close(self):
+        """Window X: hang up first so the peer gets CALL_END, then tear down."""
+        self._closing = True               # _poll must not reschedule on a dead root
+        try:
+            if self.worker and self.worker.is_alive():
+                self._hung_up = True
+                try:
+                    self.call_handle.hang_up()
+                finally:
+                    self.stop_event.set()   # even if the socket is dead, free the worker
+                self.worker.join(timeout=CLOSE_JOIN_S)
+        except Exception:                   # nothing may keep the window from closing
+            pass
+        finally:
+            self.root.destroy()
+
+    def _rotation_ready(self):
+        # Older CallHandles have no rotation_ready(): treat them as always ready.
+        return getattr(self.call_handle, "rotation_ready", lambda: True)()
+
+    def _end_text(self):
+        # callctl only exposes the flag privately; it is set when the reader saw a
+        # peer CALL_END or the TCP close.
+        return end_text(self._hung_up, bool(getattr(self.call_handle, "_peer_ended", False)))
+
     def _rotate(self):
+        if not self._rotation_ready():
+            self.state_label.config(text="old key retiring…")
+            return
         try:
             gen = self.call_handle.rotate_keys()
         except RuntimeError as exc:
@@ -234,10 +274,7 @@ class DemoWindow:
             put(("state", "connected — talk"))
             demo._run_call(conn, udp, dest, session, args, stats=stats, controls=self.controls,
                            stop_event=stop, call_handle=handle)
-            if self._hung_up:
-                put(("state", "hung up"))
-            else:                           # the peer ended it (or a WAV input finished)
-                put(("state", "call ended by peer" if cfg["input"] == "mic" else "call ended"))
+            put(("state", self._end_text()))
         except Exception as e:                      # surface failures in the UI, not a dead thread
             put(("state", f"error: {e}"))
         finally:
@@ -249,6 +286,8 @@ class DemoWindow:
     # ---------------- export ----------------
 
     def _export(self):
+        if self._export_thread and self._export_thread.is_alive():
+            return
         if not self.telemetry or not self.telemetry.rows:
             messagebox.showinfo("Nothing to export", "Telemetry starts once a call is connected "
                                 "and takes one sample per second.")
@@ -256,39 +295,60 @@ class DemoWindow:
         out_dir = filedialog.askdirectory(title="Export session to folder")
         if not out_dir:
             return
-        try:
-            paths = self.telemetry.export(out_dir)
-        except Exception as exc:        # e.g. matplotlib missing: say so, keep the demo alive
-            messagebox.showerror("Export failed", str(exc))
-            return
-        self.export_label.config(text="Exported:\n" + "\n".join(paths))
+        # Copy on this thread; the PNG charts take seconds, so render off it.
+        tel = snapshot_for_export(self.telemetry)
+        self.export_btn.state(["disabled"])
+        self.export_label.config(text="Exporting…")
+
+        def work():
+            try:
+                self.events.put(("exported", tel.export(out_dir)))
+            except Exception as exc:        # e.g. matplotlib missing: say so, keep the demo alive
+                self.events.put(("export_failed", str(exc)))
+
+        self._export_thread = threading.Thread(target=work, daemon=True)
+        self._export_thread.start()
 
     # ---------------- UI refresh (main thread only) ----------------
 
     def _sample(self):
-        self.telemetry.sample(self._clock() - self._t0)
+        self.telemetry.sample(self._cc.now())
         self._last_sample = self._clock()
 
-    def _poll(self):
+    def _drain(self):
         while True:
             try:
                 kind, value = self.events.get_nowait()
             except queue.Empty:
-                break
+                return
             if kind == "state":
                 self.state_label.config(text=value)
             elif kind == "connected":
                 self._live = True
-                self._t0 = self._last_sample = self._clock()
+                self._cc.start()
+                self._last_sample = self._clock()
                 self.telemetry = Telemetry(self.stats, self.controls)
+            elif kind == "exported":
+                self.export_btn.state(["!disabled"])
+                self.export_label.config(text="Exported:\n" + "\n".join(value))
+            elif kind == "export_failed":
+                self.export_btn.state(["!disabled"])
+                self.export_label.config(text="")
+                messagebox.showerror("Export failed", value)
             elif kind == "done":
-                if self._live:
-                    self._sample()          # close the last partial interval for export
-                self._live = False
-                self.start_btn.state(["!disabled"])
-                self.stop_btn.state(["disabled"])
-                self.conn.set_locked(False)
+                try:
+                    if self._live:
+                        self._sample()      # close the last partial interval for export
+                finally:                    # never leave Start locked, whatever the sample did
+                    self._live = False
+                    self._cc.freeze()       # keep the finished call on screen
+                    self.start_btn.state(["!disabled"])
+                    self.stop_btn.state(["disabled"])
+                    self.conn.set_locked(False)
 
+    def _refresh(self):
+        # Sampling is "about once a second": the 200 ms poll lands it between 1.0 and
+        # 1.2 s. Telemetry records the real time of each sample, nothing assumes 1 s.
         if self._live and self._clock() - self._last_sample >= SAMPLE_S:
             self._sample()
         rows = self.telemetry.rows if self.telemetry else []
@@ -296,11 +356,21 @@ class DemoWindow:
         self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
         self.handshake_panel.update(stats)
         self.security.update(self._live, self.call_handle.key_generation(),
-                             self.call_handle.key_fingerprint())
+                             self.call_handle.key_fingerprint(), ready=self._rotation_ready())
         if rows or self.telemetry:
             self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
-                              self._clock() - self._t0)
-        self.root.after(POLL_MS, self._poll)
+                              self._cc.now())
+
+    def _poll(self):
+        """Never lets an exception end the loop: a dead poll freezes the stats mid-demo."""
+        try:
+            self._drain()
+            self._refresh()
+        except Exception as exc:
+            self.state_label.config(text=f"UI error: {exc}")
+        finally:
+            if not self._closing:
+                self.root.after(POLL_MS, self._poll)
 
 
 def _handshake_info():

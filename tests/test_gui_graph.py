@@ -61,3 +61,17 @@ def test_values_above_the_scale_clamp_to_the_plot_edge():
 @pytest.mark.parametrize("v,want", [(0, 10), (7, 10), (11, 20), (20, 20), (21, 50), (50, 50), (51, 100), (400, 100)])
 def test_nice_max(v, want):
     assert nice_max(v) == want
+
+
+def test_recovered_per_second_uses_the_real_interval_not_an_assumed_second():
+    # polls land every ~1.2 s, not 1.0: 12 frames in 1.2 s is 10/s
+    rows = [row(1.2, recovered=0), row(2.4, recovered=12), row(3.4, recovered=5)]
+    series, _ = scale_series(rows, BOX, now=3.4)
+    per_s = [10 + 200 * (1 - y_frac) for y_frac in (0, 10 / 10, 5 / 10)]   # y_max == 10 here
+    assert [y for _, y in series["Recovered /s"]] == [pytest.approx(v) for v in per_s]
+
+
+def test_a_sliver_interval_at_hang_up_does_not_spike_the_rate():
+    rows = [row(10.0, recovered=0), row(10.05, recovered=1)]
+    series, y_max = scale_series(rows, BOX, now=10.05)
+    assert y_max == 10.0 and series["Recovered /s"][1][1] >= 170 - 1e-9   # <= 2 frames/s

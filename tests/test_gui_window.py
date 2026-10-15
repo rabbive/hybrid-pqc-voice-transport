@@ -65,8 +65,8 @@ def test_preset_moves_sliders_and_controls_then_poll_samples_telemetry(root):
     assert len(win.telemetry.rows) == 1
     tiles = win.stats_panel.values
     assert tiles["Sent"].cget("text") == "80" and tiles["Recovered (FEC)"].cget("text") == "6"
-    assert tiles["Measured loss"].cget("text") == "30.0 %"
-    assert tiles["MOS"].cget("text") != "—"
+    assert tiles["Loss you hear"].cget("text") == "30.0 %"
+    assert tiles["MOS (audio you hear)"].cget("text") != "—"
     assert "12.5 ms" in win.handshake_panel.values["Handshake time"].cget("text")
     assert win.handshake_panel.values["Largest datagram"].cget("text").startswith("173 B")
 
@@ -112,8 +112,24 @@ def test_export_after_hang_up_lists_written_paths(root, tmp_path, monkeypatch):
     win._poll()
     monkeypatch.setattr("hpqv.gui.filedialog.askdirectory", lambda **k: str(tmp_path))
     win._export()
+    win._export_thread.join(30)                    # charts render off the Tk thread
+    win._poll()
     assert (tmp_path / "timeline.csv").exists()
     assert "timeline.csv" in win.export_label.cget("text")
+
+
+def test_close_button_is_wired_to_the_hang_up_handler(root):
+    win = DemoWindow(root)
+    assert root.protocol("WM_DELETE_WINDOW")       # a Tcl command is registered
+
+
+def test_presets_leave_repair_fec_and_bitrate_alone(root):
+    win = DemoWindow(root)
+    win.controls.set(repair="plc", fec=False, bitrate=24000)
+    win.network.apply_preset("Congested")
+    win.network.apply_preset("Clean")
+    assert (win.controls.get("repair"), win.controls.get("fec"), win.controls.get("bitrate")) == ("plc", False, 24000)
+    assert win.network.repair.get() == "plc" and win.network.fec.get() is False
 
 
 def test_start_validates_the_wav_choice(root, monkeypatch):

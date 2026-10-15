@@ -3,14 +3,22 @@
 Kept apart from the widgets so they are unit-testable and so there is one
 definition of every range and label shared by the sliders and the tests.
 """
+import copy
+import wave
 from dataclasses import dataclass
 from typing import Callable
 
+from hpqv.audio import CHANNELS, FS
 from hpqv.controls import DEFAULTS
 from hpqv.telemetry import JITTER_FRAME_MS
 
-# Overrides on DEFAULTS. Presets always write every knob, so picking one never
-# leaves a stale setting from the previous preset behind.
+# Presets own the network knobs and nothing else: repair mode, FEC and bitrate
+# are what the presenter A/Bs while a preset is held, so a preset must not reset them.
+NETWORK_KNOBS = ("loss_pct", "loss_model", "burst_len", "delay_ms", "jitter_ms",
+                 "incoming_loss_pct", "jitter_depth")
+
+# Overrides on the network defaults. A preset writes every network knob, so picking
+# one never leaves a stale setting from the previous preset behind.
 PRESETS = {
     "Clean": {},
     "Bad Wi-Fi": dict(loss_pct=5, loss_model="random", delay_ms=40, jitter_ms=20),
@@ -20,7 +28,7 @@ PRESETS = {
 
 
 def preset_values(name) -> dict:
-    return {**DEFAULTS, **PRESETS[name]}
+    return {**{k: DEFAULTS[k] for k in NETWORK_KNOBS}, **PRESETS[name]}
 
 
 # ---------------- sliders ----------------
@@ -65,11 +73,11 @@ def _unit(unit):
 
 
 SLIDERS = [
-    SliderSpec("loss_pct", "Outgoing loss", 0, 50, _unit("%")),
+    SliderSpec("loss_pct", "Outgoing loss\napplied to audio the peer hears", 0, 50, _unit("%")),
     SliderSpec("burst_len", "Mean burst length", 1, 10, lambda v: f"{v:.0f} packets"),
     SliderSpec("delay_ms", "Delay", 0, 500, _unit("ms")),
     SliderSpec("jitter_ms", "Jitter", 0, 200, _unit("ms")),
-    SliderSpec("incoming_loss_pct", "Incoming loss", 0, 50, _unit("%")),
+    SliderSpec("incoming_loss_pct", "Incoming loss\napplied to audio you hear", 0, 50, _unit("%")),
     SliderSpec("jitter_depth", "Jitter buffer", 1, 15, _depth_text),
     SliderSpec("bitrate", "Opus bitrate", 7, 64, _bitrate_text, _bitrate_to_knob, _bitrate_to_slider),
 ]
@@ -91,9 +99,9 @@ def stat_tiles(stats: dict, row) -> list:
         ("Late", str(stats["late"])),
         ("Recovered (FEC)", str(stats["recovered"])),
         ("Concealed", str(stats["concealed"])),
-        ("Measured loss", pct("interval_loss_pct")),
+        ("Loss you hear", pct("interval_loss_pct")),
         ("Residual loss", pct("residual_loss_pct")),
-        ("MOS", f"{row['mos']:.2f}" if row else NONE),
+        ("MOS (audio you hear)", f"{row['mos']:.2f}" if row else NONE),
     ]
 
 
@@ -112,3 +120,63 @@ def handshake_rows(info, stats: dict) -> list:
                  ("HELLO / ACCEPT / total", NONE), ("Transport", "TCP"), ("UDP fragments", "0")]
     return facts + [("Handshake time", f"{ms:.1f} ms" if ms else NONE),
                     ("Largest datagram", f"{biggest} B  (cap {cap} B)" if biggest else NONE)]
+
+
+# ---------------- call lifecycle ----------------
+
+def validate_wav(path) -> "str | None":
+    """Why `path` cannot be a call input, or None. Mirrors demo.FrameSource's checks."""
+    try:
+        with wave.open(path, "rb") as w:
+            rate, ch, width = w.getframerate(), w.getnchannels(), w.getsampwidth()
+    except OSError as e:
+        return f"Cannot open {path}: {e.strerror or e}"
+    except (wave.Error, EOFError) as e:
+        return f"{path} is not a readable PCM WAV file ({e})."
+    if (rate, ch, width) != (FS, CHANNELS, 2):
+        return (f"WAV must be {FS // 1000} kHz mono 16-bit PCM; this file is "
+                f"{rate / 1000:g} kHz, {ch} channel(s), {width * 8}-bit.")
+    return None
+
+
+def end_text(hung_up: bool, peer_ended: bool) -> str:
+    """State-label text once the call is over; claims the peer only when it really ended it."""
+    if hung_up:
+        return "hung up"
+    return "call ended by peer" if peer_ended else "call ended"
+
+
+def rotate_button_state(live: bool, ready: bool) -> tuple:
+    """(enabled, label) for Rotate keys: one rotation at a time while the old key retires."""
+    if live and not ready:
+        return False, "Old key retiring…"
+    return live, "Rotate keys"
+
+
+class CallClock:
+    """Seconds since the call connected, frozen at hang-up so the graph keeps its data."""
+
+    def __init__(self, clock):
+        self._clock = clock
+        self._t0, self._frozen = 0.0, None
+
+    def start(self):
+        self._t0, self._frozen = self._clock(), None
+
+    def freeze(self):
+        if self._frozen is None:
+            self._frozen = self._clock() - self._t0
+
+    def now(self) -> float:
+        return self._frozen if self._frozen is not None else self._clock() - self._t0
+
+
+def snapshot_for_export(telemetry):
+    """A Telemetry copy whose rows/events a worker can read while sampling carries on.
+
+    Take it on the main thread. Rows are never mutated after being appended, so
+    copying the lists is enough.
+    """
+    snap = copy.copy(telemetry)
+    snap.rows, snap.events = list(telemetry.rows), list(telemetry.events)
+    return snap

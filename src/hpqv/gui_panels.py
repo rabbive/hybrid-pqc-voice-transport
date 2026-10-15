@@ -6,7 +6,7 @@ the window shell never reaches into a panel's internals.
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from hpqv.gui_logic import NONE, handshake_rows, stat_tiles
+from hpqv.gui_logic import NONE, handshake_rows, rotate_button_state, stat_tiles
 
 
 class ConnectionPanel:
@@ -51,7 +51,7 @@ class ConnectionPanel:
         self.wav_entry.grid(row=1, column=1, sticky="w")
         self.wav_pick = ttk.Button(media, text="…", width=3, command=self._pick_wav)
         self.wav_pick.grid(row=1, column=2, padx=4)
-        ttk.Label(media, text="16 kHz mono 16-bit PCM; plays once, then the call ends.").grid(
+        ttk.Label(media, text="48 kHz mono 16-bit PCM; plays once, then the call ends.").grid(
             row=2, column=0, columnspan=3, sticky="w")
         self.record_check = ttk.Checkbutton(media, text="Record received audio",
                                             variable=self.record, command=self._on_record)
@@ -152,8 +152,10 @@ class SecurityPanel:
         ttk.Label(box, text="Both sides re-key mid-call; the audio never stops.",
                   wraplength=480).grid(row=3, column=0, columnspan=2, sticky="w", padx=6, pady=4)
 
-    def update(self, live, generation, fingerprint):
-        self.button.state(["!disabled"] if live else ["disabled"])
+    def update(self, live, generation, fingerprint, ready=True):
+        enabled, text = rotate_button_state(live, ready)
+        self.button.config(text=text)
+        self.button.state(["!disabled"] if enabled else ["disabled"])
         self.gen.config(text=str(generation) if live else NONE)
         self.fingerprint.config(text=fingerprint if live and fingerprint else NONE)
 
