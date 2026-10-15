@@ -64,9 +64,13 @@ Owns `src/hpqv/telemetry.py` (new), `demo.listen`/`demo.call` handshake timing,
   Expose a `demo.handshake_info()` dict for the GUI: algorithms, byte counts,
   transport "TCP", UDP fragments 0, datagram cap 1200.
 - `Telemetry(stats, controls)`: `sample(t)` appends one row per call (GUI calls it
-  1×/s): time, all counters, per-interval loss % (offered vs delivered), residual
-  loss % after repair, live MOS via `eval.mos.mos_from_network(delay, jitter,
-  residual_loss)` with delay = delay_ms + 20·jitter_depth, and every knob value.
+  ~1×/s, `dt_s` records the real spacing): time, all counters, and — measured
+  only by the local receiver on the PEER's stream — per-interval loss % (seq span
+  expected vs delivered), residual loss % after repair, RFC 3550 jitter, added
+  one-way delay relative to the lowest transit seen this call, and live MOS via
+  `eval.mos.mos_from_network(20·jitter_depth + added_delay, 0, residual_loss)`
+  (jitter term 0: the real buffer is already in delay). Local knob values are
+  recorded as `knob_*` for context; sender knobs affect what the peer hears.
   `events` list records knob changes and key rotations with timestamps.
 - `export(out_dir) -> list[paths]`: `timeline.csv`, `summary.md` (settings,
   totals, mean/min MOS per settings segment, recovered/lost ratio), and PNGs:

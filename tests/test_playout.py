@@ -14,9 +14,11 @@ from hpqv.audio import FRAME_SAMPLES, FS, OpusCodec, _encoder_get, _encoder_set
 from hpqv.controls import CallControls
 from hpqv.demo import Stats, _receiver_loop
 from hpqv.eval.fec_recovery import _frames, _segmental_snr_db, _test_signal
-from hpqv.playout import MAX_GAP, Playout
+from hpqv import playout as playout_mod
+from hpqv.playout import MAX_GAP, Playout, packet_has_lbrr
 
 N = 40
+_ALWAYS = lambda opus, fec_hint: True
 
 
 def _session():
@@ -37,7 +39,7 @@ def _run(packets, dropped):
     out = []
     for seq, opus in enumerate(packets):
         if seq not in dropped:
-            out += pl.frames(seq, opus)
+            out += pl.frames(seq, opus, fec_hint=True)     # encoder FEC is on
     return pl, out
 
 
@@ -107,7 +109,7 @@ def test_gap_calls_codec_in_exact_order():
             calls.append(("conceal",))
             return b"plc"
 
-    pl = Playout(RecordingCodec())
+    pl = Playout(RecordingCodec(), has_lbrr=_ALWAYS)
     for seq in (10, 11, 14):
         pl.frames(seq, b"p%d" % seq)
     assert calls == [
@@ -141,7 +143,7 @@ def test_repair_modes_define_gap_audio_and_counters(repair, expected_calls, expe
             calls.append(("conceal",))
             return b"plc"
 
-    playout = Playout(RecordingCodec(), repair=repair)
+    playout = Playout(RecordingCodec(), repair=repair, has_lbrr=_ALWAYS)
     out = playout.frames(10, b"p10") + playout.frames(14, b"p14")
     assert calls == expected_calls
     assert out == expected_pcm
@@ -220,7 +222,7 @@ def test_huge_gap_is_not_synthesized():
     assert len(pl.frames(MAX_GAP + 6, packets[MAX_GAP + 6])) == 1   # resynced
 
 
-def _receive(order, depth):
+def _receive(order, depth, packets=None, flags=packet.FLAG_FEC):   # encoder FEC on
     """Send packets `order` (seqs into _packets) over loopback to _receiver_loop."""
     key, send_prefix, recv_prefix = _session()
     session = (key, None, send_prefix)       # receiver opens what we seal
@@ -240,9 +242,9 @@ def _receive(order, depth):
         target=_receiver_loop, args=(rx, session, sink, CallControls(jitter_depth=depth), stats, stop))
     t.start()
     try:
-        packets = _packets(max(order) + 1)
+        packets = packets or _packets(max(order) + 1)
         for seq in order:
-            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]),
+            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq], flags=flags),
                       rx.getsockname())
         for _ in range(100):
             if stats.snapshot()[1] >= len(order):
@@ -347,3 +349,147 @@ def test_recovered_counts_frames_missing_at_playout_not_lost_datagrams():
     assert stats.snapshot()[3] == 1          # 5 rebuilt via FEC
     assert stats.as_dict()["late"] == 1
     assert len(sink.frames) == 7             # seqs 0..6, 5 exactly once
+
+
+def test_lowering_jitter_depth_drains_the_backlog_while_running():
+    """Depth 15 -> 1 with 14 frames buffered: the next packet must flush the
+    buffer down to the new depth, not pop one frame and stay 14 frames behind."""
+    key, send_prefix, _ = _session()
+    session = (key, None, send_prefix)
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+
+    class Sink:
+        def __init__(self):
+            self.frames = []
+
+        def write(self, pcm):
+            self.frames.append(pcm)
+
+    sink, stats, stop = Sink(), Stats(), threading.Event()
+    controls = CallControls(jitter_depth=15)
+    thread = threading.Thread(target=_receiver_loop,
+                              args=(rx, session, sink, controls, stats, stop))
+    thread.start()
+    packets = _packets(17)
+
+    def send_and_wait(seqs, frames):
+        for seq in seqs:
+            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+        for _ in range(100):
+            if stats.received == seqs[-1] + 1 and len(sink.frames) >= frames:
+                break
+            threading.Event().wait(0.01)
+
+    try:
+        send_and_wait(list(range(16)), 2)
+        assert len(sink.frames) == 2             # 14 frames buffered at depth 15
+        controls.set(jitter_depth=1)
+        send_and_wait([16], 16)
+        occupancy = 17 - len(sink.frames)        # checked before stop flushes the buffer
+    finally:
+        stop.set()
+        thread.join(timeout=3)
+        tx.close()
+        rx.close()
+    assert occupancy <= 1, occupancy
+
+
+class _RecordingCodec:
+    def __init__(self):
+        self.calls = []
+
+    def decode(self, data, decode_fec=False):
+        self.calls.append(("decode", data, decode_fec))
+        return b"fec" if decode_fec else b"pcm"
+
+    def conceal(self):
+        self.calls.append(("conceal",))
+        return b"plc"
+
+
+def test_fec_repair_conceals_when_the_next_packet_carries_no_lbrr():
+    codec = _RecordingCodec()
+    pl = Playout(codec, has_lbrr=lambda opus, fec_hint: False)
+    out = pl.frames(10, b"p10") + pl.frames(14, b"p14")
+    assert codec.calls == [("decode", b"p10", False), ("conceal",), ("conceal",),
+                           ("conceal",), ("decode", b"p14", False)]
+    assert out == [b"pcm", b"plc", b"plc", b"plc", b"pcm"]
+    assert (pl.recovered, pl.concealed) == (0, 3)
+
+
+def _silk_packets(n, fec=True):
+    enc = OpusCodec(fec=fec)
+    _encoder_set(enc.enc, 4002, 20000)            # 20 kbit/s speech: SILK, LBRR when FEC on
+    pcm = _speech_like(n)
+    return [enc.encode(pcm[i:i + FRAME_SAMPLES].tobytes())
+            for i in range(0, len(pcm), FRAME_SAMPLES)]
+
+
+_CELT = bytes([31 << 3]) + bytes(40)              # TOC config 31: CELT-only, never LBRR
+
+
+@pytest.mark.skipif(playout_mod._HAS_LBRR is None or not _opus_ctls_work(),
+                    reason="libopus without opus_packet_has_lbrr")
+def test_has_lbrr_asks_libopus_and_ignores_the_sender_hint():
+    with_fec, without = _silk_packets(30)[10:], _silk_packets(30, fec=False)[10:]
+    assert sum(packet_has_lbrr(p, False) for p in with_fec) >= len(with_fec) // 2
+    assert not any(packet_has_lbrr(p, True) for p in without)
+    assert packet_has_lbrr(_CELT, True) is False
+
+
+def test_has_lbrr_fallback_trusts_the_sender_flag_except_for_celt(monkeypatch):
+    monkeypatch.setattr(playout_mod, "_HAS_LBRR", None)
+    silk = _silk_packets(12, fec=False)[-1]
+    assert packet_has_lbrr(silk, True) is True    # possibly-LBRR: sender had FEC on
+    assert packet_has_lbrr(silk, False) is False
+    assert packet_has_lbrr(_CELT, True) is False
+
+
+@pytest.mark.parametrize("flags, counts", [(0, (0, 1)), (packet.FLAG_FEC, (1, 0))])
+def test_receiver_fallback_uses_the_fec_flag(monkeypatch, flags, counts):
+    monkeypatch.setattr(playout_mod, "_HAS_LBRR", None)
+    stats, sink = _receive([s for s in range(12) if s != 5], depth=3,
+                           packets=_silk_packets(12), flags=flags)
+    assert (stats.recovered, stats.concealed) == counts
+    assert len(sink.frames) == 12
+
+
+def test_sender_sets_flag_bit_1_while_encoder_fec_is_on():
+    import hpqv.demo as demo
+    from hpqv.keyring import Keyring
+
+    class FakeSock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, dg, dest):
+            self.sent.append(dg)
+
+    class Source:
+        def __init__(self, controls):
+            self.controls = controls
+
+        def frames(self):
+            for i in range(4):
+                if i == 2:
+                    self.controls.set(fec=False)
+                yield b"\x00\x01" * FRAME_SAMPLES
+
+    key, send_prefix, recv_prefix = _session()
+    ring = Keyring((key, send_prefix, recv_prefix))
+    ring.rotate_next()                            # generation 1: parity bit must survive
+    send_key, send_prefix2, _ = ring._cur
+    controls, sock = CallControls(), FakeSock()
+    demo._sender_loop(sock, ("127.0.0.1", 9), ring, Source(controls), controls,
+                      Stats(), threading.Event())
+    flags = [packet.open_(send_key, send_prefix2, dg)[1] for dg in sock.sent]
+    assert flags == [5, 5, 1, 1]                 # bit 2 = FEC hint, bits 0-1 = generation tag
+
+
+def test_extra_flags_cannot_touch_the_generation_tag_bits():
+    from hpqv.keyring import Keyring
+    key, send_prefix, recv_prefix = _session()
+    dg = Keyring((key, send_prefix, recv_prefix)).seal(0, b"x", extra_flags=0x07)
+    assert packet.open_(key, send_prefix, dg)[1] == 0x04      # generation 0, FEC bit only

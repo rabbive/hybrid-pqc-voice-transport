@@ -3,6 +3,9 @@ from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
 
 MAX_DATAGRAM = 1200
 VERSION, TYPE_VOICE = 1, 1
+# Header flags: bits 0-1 = key-generation tag (keyring); bit 2 = sender's
+# encoder FEC was on, so the packet may carry LBRR (docs/wire-format.md).
+FLAG_FEC = 0x04
 
 def _header(seq: int, flags: int) -> bytes:
     return struct.pack(">BBQB", VERSION, TYPE_VOICE, seq, flags)

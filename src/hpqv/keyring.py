@@ -40,11 +40,12 @@ class Keyring:
         with self._lock:
             return hashlib.sha256(self._cur[0]).hexdigest()[:8]
 
-    def seal(self, seq, frame) -> bytes:
+    def seal(self, seq, frame, extra_flags=0) -> bytes:
+        """`extra_flags` sets header bits 2-7; bits 0-1 always stay the keyring's."""
         with self._lock:
             key, send_prefix, _ = self._cur
             generation = self._gen & 0x3
-        return packet.seal(key, send_prefix, seq, frame, flags=generation)
+        return packet.seal(key, send_prefix, seq, frame, flags=generation | (extra_flags & ~0x03))
 
     def rotation_ready(self) -> bool:
         with self._lock:
