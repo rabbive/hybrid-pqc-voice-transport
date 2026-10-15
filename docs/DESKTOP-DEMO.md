@@ -23,7 +23,7 @@ These are development builds. Windows is unsigned; macOS is ad-hoc signed, not A
 7. On B, choose Call, enter A's address followed by :9000, such as 192.168.1.42:9000, and click Start. Never use the example address unless it is actually A's address.
 8. Allow microphone and local-network access if prompted. Allow HPQV through the firewall on your trusted private network.
 9. Both windows should say connected. Talk in both directions and watch the in/out meters and received counter.
-10. Move the loss slider from 0% to 20–30%, then back to 0%. It drops outgoing voice packets on that computer. Record what you hear and the counters; high loss may cause substantial degradation.
+10. On the Network tab, move the outgoing loss slider from 0% to 20–30%, then back to 0%. It drops outgoing voice packets on that computer, so the *other* computer's tiles show it. Record what you hear and the counters; high loss may cause substantial degradation. For a full presentation script (repair modes, burst loss, key rotation, export) see [DEMO-RUNBOOK.md](DEMO-RUNBOOK.md).
 11. Click Hang up on both peers after the test.
 
 Generate the identity only once per pair of tests. Two independently generated files will not authenticate.
@@ -59,7 +59,7 @@ On Mac:
 ./hpqv-cli/hpqv-cli call 192.168.1.42:9000 --identity-file identity.json --seconds 300
 ```
 
-Add --drop-pct 30 for fixed loss in CLI mode. GUI loss changes live. GUI calls run up to one hour; CLI defaults to 30 seconds unless --seconds is set. --help lists file-input/output options.
+Add --drop-pct 30 for fixed loss in CLI mode. GUI loss changes live. GUI microphone calls run until you press Hang up (a WAV input ends the call when the file ends); the CLI defaults to 30 seconds unless --seconds is set. --help lists file-input/output options.
 
 ## Suggested two-device check
 

@@ -4,6 +4,11 @@
 **Code:** `src/hpqv/eval/handshake_survival.py`, `scripts/run_handshake_survival.py`
 **Data:** `results/handshake_survival.csv`, `results/handshake_survival.png`
 
+> **Superseded as the headline by [EXPERIMENT-full-handshake.md](EXPERIMENT-full-handshake.md).** This run sends a random
+> 10,842-byte blob with a 1 s UDP timeout against a 20 s TCP timeout and does not run the authenticated
+> handshake. Quote the full-handshake numbers (84 % vs 18 % at 20 % loss, one 3 s deadline) for
+> "does a real call set up"; keep this one as the earlier experiment.
+
 ## Why this experiment exists
 
 The main evaluation (Track 2) proves a **structural** property: our hybrid transport produces
