@@ -6,3 +6,4 @@ __pycache__/
 dist/
 .build/
 identity.json
+.DS_Store
