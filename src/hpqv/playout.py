@@ -11,11 +11,15 @@ class Playout:
     def __init__(self, codec):
         self.codec = codec
         self.next_seq = None
+        # Frames missing at playout time (lost or arrived too late), rebuilt
+        # from FEC / concealed by PLC. Can exceed datagrams actually lost.
         self.recovered = 0
         self.concealed = 0
 
     def frames(self, seq, opus):
         """PCM frames to play for this packet, in order, filling any gap before it."""
+        if self.next_seq is not None and seq < self.next_seq:
+            return []                # late or duplicate: already played or rebuilt
         out = []
         gap = 0 if self.next_seq is None else seq - self.next_seq
         if 0 < gap <= MAX_GAP:
@@ -25,5 +29,5 @@ class Playout:
             out.append(self.codec.decode(opus, decode_fec=True))
             self.recovered += 1
         out.append(self.codec.decode(opus))
-        self.next_seq = max(seq + 1, self.next_seq or 0)   # late dup must not rewind
+        self.next_seq = seq + 1
         return out

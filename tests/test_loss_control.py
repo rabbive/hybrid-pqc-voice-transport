@@ -76,3 +76,46 @@ def test_sender_honours_a_mid_call_loss_change():
     sent, _received, dropped, _recovered = stats.snapshot()
     assert sent == 50, f"expected 50 sent before the flip, got {sent}"
     assert dropped == 50, f"expected 50 dropped after the flip, got {dropped}"
+
+
+def test_sender_encodes_every_frame_and_drops_only_the_datagram(monkeypatch):
+    """A network loss happens after encoding: the encoder must still see the
+    dropped frame, or the FEC in packet N+1 describes frame N-1, not N."""
+    import hpqv.demo as demo
+    from hpqv import packet
+
+    encoded = []
+
+    class SpyCodec(demo.OpusCodec):
+        def encode(self, pcm):
+            encoded.append(pcm)
+            return super().encode(pcm)
+
+    class FakeSock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, dg, dest):
+            self.sent.append(dg)
+
+    class OneLossSource:
+        def __init__(self, loss, drop_at, count):
+            self.loss, self.drop_at, self.count = loss, drop_at, count
+
+        def frames(self):
+            for i in range(self.count):
+                self.loss.pct = 100 if i == self.drop_at else 0
+                yield FRAME
+
+    monkeypatch.setattr(demo, "OpusCodec", SpyCodec)
+    key, send_prefix, recv_prefix = _session()
+    loss, stats, sock = LossControl(0.0), Stats(), FakeSock()
+    _sender_loop(sock, ("127.0.0.1", 9), (key, send_prefix, recv_prefix),
+                 OneLossSource(loss, drop_at=3, count=8), loss, stats,
+                 threading.Event())
+
+    assert len(encoded) == 8
+    assert len(sock.sent) == 7
+    assert [packet.open_(key, send_prefix, dg)[0] for dg in sock.sent] == [0, 1, 2, 4, 5, 6, 7]
+    sent, _rx, dropped, _rec = stats.snapshot()
+    assert (sent, dropped) == (7, 1)

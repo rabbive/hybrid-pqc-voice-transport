@@ -200,7 +200,8 @@ class Stats:
         self.sent = 0
         self.received = 0
         self.dropped = 0
-        # Frames rebuilt by Opus in-band FEC / concealed by PLC in the receiver.
+        # Frames missing at playout time (lost or arrived too late), rebuilt from
+        # FEC / concealed by PLC in the receiver. Not the same as `dropped`.
         self.recovered = 0
         self.concealed = 0
         # Most recent frame energy each way, for the GUI level meters.
@@ -240,13 +241,13 @@ def _sender_loop(udp_sock, dest, session, source, loss, stats, stop_event):
             level = _rms(pcm)
             with stats.lock:
                 stats.tx_level = level
+            opus = codec.encode(pcm)     # encode first: a real loss happens after the encoder
             drop_pct = loss.pct          # re-read every frame: changeable mid-call
             if drop_pct > 0 and random.random() * 100 < drop_pct:
                 with stats.lock:
                     stats.dropped += 1
                 seq += 1
                 continue
-            opus = codec.encode(pcm)
             dg = packet.seal(key, send_prefix, seq, opus)
             udp_sock.sendto(dg, dest)
             with stats.lock:
@@ -267,12 +268,14 @@ def _receiver_loop(udp_sock, session, sink, jitter_depth, stats, stop_event):
 
     def play(seq, opus):
         r0, c0 = playout.recovered, playout.concealed
-        for pcm in playout.frames(seq, opus):
+        frames = playout.frames(seq, opus)
+        for pcm in frames:
             sink.write(pcm)
         with stats.lock:
             stats.recovered += playout.recovered - r0
             stats.concealed += playout.concealed - c0
-            stats.rx_level = _rms(pcm)
+            if frames:               # Playout drops late/duplicate packets
+                stats.rx_level = _rms(frames[-1])
 
     while not stop_event.is_set():
         try:
