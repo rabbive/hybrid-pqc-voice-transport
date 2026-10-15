@@ -63,7 +63,9 @@ def test_preset_moves_sliders_and_controls_then_poll_samples_telemetry(root):
     win._poll()                                    # call starts: telemetry baseline at t=0
     s = win.stats
     with s.lock:
+        # Loss is measured on the received stream: 70 of the peer's 100 frames arrived.
         s.sent, s.dropped, s.received, s.recovered, s.late = 80, 20, 70, 6, 1
+        s.rx_expected = 100
         s.handshake_ms, s.max_datagram, s.key_gen = 12.5, 173, 2
     now[0] += 1.2
     win._poll()
