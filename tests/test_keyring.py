@@ -1,9 +1,8 @@
 """Live key rotation must never weaken the AEAD.
 
-The keyring holds at most two generations and picks one by the header's parity
-bit. These tests pin the properties a reviewer will ask about: in-flight packets
-survive a rotation, the old key really goes away, a (key, nonce) pair is never
-reused, and nothing but an in-sequence generation number moves the ring.
+The keyring keeps each unexpired generation and picks one by the header tag.
+These tests pin that in-flight packets survive rotation, expired keys go away,
+nonces never repeat, and only an in-sequence generation moves the ring.
 """
 import pytest
 
@@ -54,6 +53,40 @@ def test_in_flight_old_generation_packet_decrypts_inside_window():
     assert b.open_(in_flight)[2] == b"sent before rotate"
 
 
+def test_peer_rotation_keeps_every_live_generation_decryptable():
+    a, b, _ = _rings()
+    b_clock = Clock()
+    b._clock = b_clock
+    gen0 = a.seal(1, b"gen0")
+    a.rotate_next()
+    assert b.rotate_to(1)
+    gen1 = a.seal(2, b"gen1")
+
+    # The sender's own window has elapsed, but the receiver's has not.
+    a._clock.t += kr.RETIRE_AFTER
+    a.rotate_next()
+    gen2 = a.seal(3, b"gen2")
+    assert b.rotate_to(2)
+
+    assert [dg[10] & 0x3 for dg in (gen0, gen1, gen2)] == [0, 1, 2]
+    assert b.open_(gen0)[2] == b"gen0"
+    assert b.open_(gen1)[2] == b"gen1"
+    assert b.open_(gen2)[2] == b"gen2"
+
+
+def test_rotation_ready_tracks_previous_key_retirement():
+    ring, _, clock = _rings()
+    assert ring.rotation_ready()
+    ring.rotate_next()
+    assert not ring.rotation_ready()
+    assert ring.rotate_next() == 1
+    assert ring.generation == 1
+    clock.t += kr.RETIRE_AFTER - 0.01
+    assert not ring.rotation_ready()
+    clock.t += 0.01
+    assert ring.rotation_ready()
+
+
 def test_old_generation_packet_fails_after_retirement():
     a, b, clock = _rings()
     in_flight = a.seal(7, b"old")
@@ -65,9 +98,10 @@ def test_old_generation_packet_fails_after_retirement():
 
 
 def test_replay_two_generations_later_fails_despite_matching_parity():
-    a, b, _ = _rings()
+    a, b, clock = _rings()
     old = a.seal(3, b"gen0")
     for gen in (1, 2):
+        clock.t += kr.RETIRE_AFTER
         a.rotate_next()
         b.rotate_to(gen)
     assert old[10] & 1 == b.generation & 1     # same parity, different key
@@ -75,7 +109,7 @@ def test_replay_two_generations_later_fails_despite_matching_parity():
         b.open_(old)
 
 
-def test_decrypt_tries_only_the_key_the_parity_names(monkeypatch):
+def test_decrypt_tries_only_the_key_the_generation_tag_names(monkeypatch):
     a, b, _ = _rings()
     a.rotate_next()
     b.rotate_to(1)
@@ -91,7 +125,7 @@ def test_decrypt_tries_only_the_key_the_parity_names(monkeypatch):
 
 
 def test_key_nonce_pair_never_repeats_across_generations(monkeypatch):
-    a, b, _ = _rings()
+    a, b, clock = _rings()
     used = []
     real = packet.seal
     monkeypatch.setattr(kr.packet, "seal", lambda key, prefix, seq, frame, flags=0:
@@ -101,6 +135,7 @@ def test_key_nonce_pair_never_repeats_across_generations(monkeypatch):
         for seq in range(5):                     # same seqs every gen, both directions
             a.seal(seq, b"x")
             b.seal(seq, b"y")
+        clock.t += kr.RETIRE_AFTER
         a.rotate_next()
         b.rotate_to(gen + 1)
     assert len(used) == 40
