@@ -166,6 +166,14 @@ def test_mic_calls_run_until_hang_up_not_an_hour():
     assert args.seconds >= 10 ** 6
 
 
+def test_wav_calls_loop_until_hang_up():
+    win = make_window()
+    win.controls = MagicMock(get=lambda k: 0)
+    wav = win._args({"identity": "i", "input": "file", "wav": "a.wav", "record_wav": None})
+    mic = win._args({"identity": "i", "input": "mic", "wav": None, "record_wav": None})
+    assert wav.loop is True and mic.loop is False
+
+
 # ---------------- 4: the graph stops scrolling after hang-up ----------------
 
 def test_graph_time_freezes_when_the_call_ends_and_restarts_on_next_connect():

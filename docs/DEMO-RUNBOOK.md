@@ -19,7 +19,9 @@ Team of three works best: **driver A** (network laptop), **driver B** (listening
 projector), **narrator**.
 
 > **Which laptop shows what.** The *outgoing* knobs on a laptop (loss, loss model, burst
-> length, delay, jitter, Encoder FEC, bitrate) change what the **peer** hears. The tiles, graph,
+> length, delay, jitter, Encoder FEC, bitrate) change what the **peer** hears. (The *Encoder FEC*
+> checkbox is labelled *in audio the peer receives* and sits with the outgoing-loss controls on
+> the Network tab.) The tiles, graph,
 > MOS and export on a laptop describe the audio **you** receive, measured by your own receiver.
 > Three knobs act on your own receiver: *Incoming loss*, *Repair mode* and *Jitter buffer*.
 
@@ -50,12 +52,14 @@ labels each change as an event and splits the summary into segments. Changes mad
 - [ ] **Audio source decision.**
   - *Recommended for a room:* **WAV file on both laptops.** Two open microphones next to two
     speakers can howl, and a noisy room ruins repeatable A/B listening. A plays a speech WAV;
-    B plays any long quiet WAV.
-  - WAV must be **48 kHz, mono, 16-bit PCM**, and it **plays once, then the call ends on both
-    sides**. Make both files **longer than the whole demo plus margin (at least 25 minutes)**.
-    Check with
-    `python -c "import wave;w=wave.open('speech.wav');print(w.getframerate(),w.getnchannels(),w.getsampwidth(),w.getnframes()/w.getframerate()/60,'min')"`
-    → expect `48000 1 2` and ≥ 25 min. (To convert, e.g. `ffmpeg -i in.m4a -ar 48000 -ac 1 -sample_fmt s16 speech.wav`.)
+    B plays any quiet WAV.
+  - WAV must be **48 kHz, mono, 16-bit PCM**. The GUI **loops** a WAV input (it restarts at the
+    end, still paced in real time), so any length works and the call runs until **Hang up**. A
+    short speech clip is fine. Check the format with
+    `python -c "import wave;w=wave.open('speech.wav');print(w.getframerate(),w.getnchannels(),w.getsampwidth())"`
+    → expect `48000 1 2`. (To convert, e.g. `ffmpeg -i in.m4a -ar 48000 -ac 1 -sample_fmt s16 speech.wav`.)
+    On the CLI, add `--loop` for the same behaviour; without it the file plays once and the call
+    ends. Loop restarts are audible as a repeat, so pick a clip that cuts cleanly.
   - **Use real speech, not tones.** FEC recovery only works when the packet carries Opus LBRR
     data, which the encoder produces for speech-like (SILK) content and never for CELT-only
     packets ([wire-format.md](wire-format.md), flags bit 2).
@@ -93,7 +97,7 @@ milliseconds; *Largest datagram* with the 1200 B cap beside it.
 **What it proves.** The handshake is about seven times a 1500 B MTU, yet it never touches UDP, so it
 cannot fragment. Voice datagrams are far under the cap.
 **Honest caveats.**
-- *UDP fragments: 0* in the panel is a constant, true by construction (the handshake is TCP; the
+- *UDP fragments: 0 (by design: handshake is on TCP)* in the panel is a constant, true by construction (the handshake is TCP; the
   voice sealer refuses datagrams over 1200 B). The **measured** evidence is the packet-capture
   result in `results/eval.csv` (hybrid 0 fragments at every loss level).
 - 10,844 B on the wire = the 10,842 B of key material quoted in the docs + a 1-byte version in
@@ -229,8 +233,7 @@ generation 2.
 **Click.** On **A**, press **Hang up**.
 **Say.** "One side hangs up; the other learns over the control channel and ends too."
 **Panel should see.** A: *hung up*. B: *call ended by peer*; the graph stops and keeps its data.
-**Caveat.** Closing a window or a dropped TCP connection also ends the call for the other side;
-a WAV reaching its end does too.
+**Caveat.** Closing a window or a dropped TCP connection also ends the call for the other side.
 
 ### 18:00–20:00 · Export → open charts and summary
 

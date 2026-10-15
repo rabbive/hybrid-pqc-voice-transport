@@ -61,8 +61,6 @@ class NetworkPanel:
         for text, value in REPAIR_MODES:
             ttk.Radiobutton(repair, text=text, value=value, variable=self.repair,
                             command=self.on_repair).pack(side="left", padx=6)
-        ttk.Checkbutton(repair, text="Encoder FEC", variable=self.fec,
-                        command=self.on_fec).pack(side="left", padx=14)
 
         net = ttk.LabelFrame(parent, text="Network impairment (sender / receiver, live)")
         net.pack(fill="x", padx=6, pady=4)
@@ -75,6 +73,10 @@ class NetworkPanel:
         for text, value in (("Random", "random"), ("Burst", "burst")):
             ttk.Radiobutton(model, text=text, value=value, variable=self.model,
                             command=self.on_model).pack(side="left", padx=4)
+        # Sender-side switch: it changes the audio the PEER receives, so it lives with
+        # the outgoing-loss controls, not in the receiver's repair box.
+        ttk.Checkbutton(model, text="Encoder FEC (in audio the peer receives)",
+                        variable=self.fec, command=self.on_fec).pack(side="left", padx=(24, 0))
         for i, knob in enumerate(("burst_len", "delay_ms", "jitter_ms", "incoming_loss_pct"), 2):
             self._add(net, i, rows[knob])
 

@@ -86,6 +86,8 @@ SLIDERS = [
 # ---------------- live numbers ----------------
 
 NONE = "—"
+# demo.handshake_info() hard-codes 0: true by construction, not measured live.
+FRAGMENTS_BY_DESIGN = "(by design: handshake is on TCP)"
 
 
 def stat_tiles(stats: dict, row) -> list:
@@ -113,11 +115,13 @@ def handshake_rows(info, stats: dict) -> list:
         facts = [("Key exchange", info["kem"]), ("Signature", info["sig"]),
                  ("HELLO / ACCEPT / total",
                   f"{info['hello_bytes']} / {info['accept_bytes']} / {info['total_bytes']} B"),
-                 ("Transport", info["transport"]), ("UDP fragments", str(info["udp_fragments"]))]
+                 ("Transport", info["transport"]),
+                 ("UDP fragments", f"{info['udp_fragments']} {FRAGMENTS_BY_DESIGN}")]
     else:
         cap = 1200
         facts = [("Key exchange", "unavailable"), ("Signature", "unavailable"),
-                 ("HELLO / ACCEPT / total", NONE), ("Transport", "TCP"), ("UDP fragments", "0")]
+                 ("HELLO / ACCEPT / total", NONE), ("Transport", "TCP"),
+                 ("UDP fragments", f"0 {FRAGMENTS_BY_DESIGN}")]
     return facts + [("Handshake time", f"{ms:.1f} ms" if ms else NONE),
                     ("Largest datagram", f"{biggest} B  (cap {cap} B)" if biggest else NONE)]
 

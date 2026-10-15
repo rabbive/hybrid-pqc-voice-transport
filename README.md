@@ -139,7 +139,7 @@ for a 1366×768 laptop or a projector:
 
 - **Call tab** — connection and identity (*Create identity* writes a new file);
   input source (*Microphone* or a *WAV file* picked from disk — 48 kHz mono 16-bit,
-  plays once and then the call ends); *Record received audio* to a WAV; and the
+  loops until you hang up); *Record received audio* to a WAV; and the
   **handshake panel**: ML-KEM / ML-DSA names, HELLO / ACCEPT / total bytes, TCP
   transport, measured handshake time, "UDP fragments: 0" and the largest datagram
   sent against the 1200 B cap.

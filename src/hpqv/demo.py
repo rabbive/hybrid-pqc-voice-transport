@@ -49,11 +49,16 @@ def _load_identity(path, role):
 
 
 class FrameSource:
-    """Yields 20ms PCM frames, either from a mic or a WAV file."""
+    """Yields 20ms PCM frames, either from a mic or a WAV file.
 
-    def __init__(self, mode, wav_path=None, seconds=30):
+    File mode plays once, or restarts at EOF with `loop` (so a short WAV can
+    carry a call that runs until hang-up).
+    """
+
+    def __init__(self, mode, wav_path=None, seconds=30, loop=False):
         self.mode = mode
         self.seconds = seconds
+        self.loop = loop
         self._stream = None
         if mode == "file":
             self._wav = wave.open(wav_path, "rb")
@@ -90,7 +95,12 @@ class FrameSource:
             while True:
                 pcm = self._wav.readframes(FRAME_SAMPLES)
                 if len(pcm) < FRAME_BYTES:
-                    return
+                    if not self.loop:
+                        return
+                    self._wav.rewind()
+                    pcm = self._wav.readframes(FRAME_SAMPLES)
+                    if len(pcm) < FRAME_BYTES:      # under one frame: looping would spin
+                        return
                 next_frame += FRAME_SAMPLES / FS
                 delay = next_frame - time.monotonic()
                 if delay > 0:
@@ -431,7 +441,8 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     """Run a call. The GUI passes in its own stats/controls/stop_event so it can
     watch the counters and turn the knobs while the call is live, and a
     call_handle to rotate keys or hang up. Either side ending ends both."""
-    source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
+    source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds,
+                         loop=args.loop)
     stats = stats if stats is not None else Stats()
     controls = controls if controls is not None else CallControls(
         loss_pct=args.drop_pct, jitter_depth=args.jitter_depth)
@@ -586,6 +597,8 @@ def _add_common_call_args(p):
     p.add_argument("--identity-file", help="shared identity file from `demo.py keygen`")
     p.add_argument("--input", choices=["mic", "file"], default="mic")
     p.add_argument("--wav", help="input WAV path, required when --input file")
+    p.add_argument("--loop", action="store_true",
+                   help="restart the input WAV at its end, so the call runs until hang-up")
     p.add_argument("--output", choices=["speaker", "file"], default="speaker")
     p.add_argument("--out-wav", help="output WAV path, required when --output file")
     p.add_argument("--drop-pct", type=float, default=0, help="%% of outgoing packets to randomly drop")

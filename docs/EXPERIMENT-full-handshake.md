@@ -66,9 +66,9 @@ What this supports:
 What it does not support:
 
 - It does not show TCP beats every reliable-UDP design. The retry baseline
-  matches it here, at the cost of resending all 6.4 KB (8 fragments) on any
-  single fragment loss and of depending on IP fragments reaching the peer, which
-  this loopback test does not challenge.
+  matches it here, at the cost of resending the whole 6,446 B HELLO (5 fragments; ACCEPT is a
+  separate 3-fragment datagram) on any single fragment loss, and of depending on IP
+  fragments reaching the peer, which this loopback test does not challenge.
 - These figures are lower than the earlier synthetic experiment (99% at 20%,
   83% at 30%) because that one used a 20 s TCP timeout and a random payload.
   Quote these numbers when the claim is about completing a real call setup.

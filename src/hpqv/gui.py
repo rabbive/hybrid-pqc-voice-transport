@@ -148,7 +148,8 @@ class DemoWindow:
         a.output, a.out_wav = "speaker", None
         a.record_wav = cfg["record_wav"]
         a.drop_pct = self.controls.get("loss_pct")
-        a.seconds = MIC_SECONDS   # run until Hang up (a WAV ends the call at EOF)
+        a.seconds = MIC_SECONDS   # run until Hang up
+        a.loop = cfg["input"] == "file"   # a WAV restarts at EOF, so Hang up ends the call
         a.jitter_depth = self.controls.get("jitter_depth")
         return a
 

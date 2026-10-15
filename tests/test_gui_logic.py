@@ -98,7 +98,7 @@ def test_handshake_rows():
     rows = dict(handshake_rows(INFO, {"handshake_ms": 12.34, "max_datagram": 173}))
     assert rows["Key exchange"] == "ML-KEM-768" and rows["Signature"] == "ML-DSA-65"
     assert rows["HELLO / ACCEPT / total"] == "3000 / 3400 / 6400 B"
-    assert rows["Transport"] == "TCP" and rows["UDP fragments"] == "0"
+    assert rows["Transport"] == "TCP" and rows["UDP fragments"] == "0 (by design: handshake is on TCP)"
     assert rows["Handshake time"] == "12.3 ms"
     assert rows["Largest datagram"] == "173 B  (cap 1200 B)"
 
