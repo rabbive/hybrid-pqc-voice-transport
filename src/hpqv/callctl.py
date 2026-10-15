@@ -37,10 +37,16 @@ class CallHandle:
         # Rotate and announce under one lock so ROTATE(n) always precedes
         # ROTATE(n + 1) on the wire; the peer only accepts current + 1.
         with self._send_lock:
+            current = self._ring.generation
             gen = self._ring.rotate_next()
+            if gen == current:
+                return current
             self._mirror(gen)
             self._send(control.MSG_KEY_ROTATE, struct.pack(">I", gen))
         return gen
+
+    def rotation_ready(self) -> bool:
+        return self._ring is not None and self._ring.rotation_ready()
 
     def hang_up(self) -> None:
         if self._stop is None:
