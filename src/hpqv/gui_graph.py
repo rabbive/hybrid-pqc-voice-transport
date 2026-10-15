@@ -2,14 +2,15 @@
 
 Left axis: loss %, residual loss % and recovered frames/s share one auto scale
 (a frame is ~1 % of a 50 fps stream, so the units line up closely enough to read
-together). Right axis: MOS, fixed 1-4.5. Samples arrive once a second, so
-interval_recovered is already "per second".
+together). Right axis: MOS, fixed 1-4.5. Samples land roughly once a second
+(the poll timer is 200 ms), so per-second rates divide by the real interval.
 """
 import math
 import tkinter as tk
 from typing import NamedTuple
 
 WINDOW_S = 60.0
+MIN_DT = 0.5             # a sliver interval (final sample at hang-up) must not spike a rate
 MOS_LO, MOS_HI = 1.0, 4.5
 
 
@@ -31,7 +32,7 @@ class Series(NamedTuple):
 SERIES = [
     Series("Loss %", "interval_loss_pct", "left", "#d62728", ()),
     Series("Residual %", "residual_loss_pct", "left", "#ff7f0e", (6, 3)),
-    Series("Recovered /s", "interval_recovered", "left", "#2ca02c", (2, 3)),
+    Series("Recovered /s", "_recovered_s", "left", "#2ca02c", (2, 3)),
     Series("MOS", "mos", "mos", "#1f77b4", (10, 3, 2, 3)),
 ]
 
@@ -52,10 +53,19 @@ def x_of(t, box, now):
     return box.left + (t - _t_lo(now)) / WINDOW_S * (box.right - box.left)
 
 
+def _with_rates(rows):
+    """Rows plus `_recovered_s`: recovered frames per second over the real interval."""
+    out, prev = [], 0.0
+    for r in rows:
+        out.append({**r, "_recovered_s": r["interval_recovered"] / max(r["t_s"] - prev, MIN_DT)})
+        prev = r["t_s"]
+    return out
+
+
 def scale_series(rows, box, now):
     """Map telemetry rows to canvas points. Returns ({name: [(x, y)]}, left_axis_max)."""
     lo = _t_lo(now)
-    rows = [r for r in rows if r["t_s"] >= lo]
+    rows = [r for r in _with_rates(rows) if r["t_s"] >= lo]
     peak = max((r[s.key] for r in rows for s in SERIES if s.axis == "left"), default=0.0)
     y_max = nice_max(peak)
     height = box.bottom - box.top

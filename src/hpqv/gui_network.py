@@ -50,7 +50,7 @@ class NetworkPanel:
         self.fec = tk.BooleanVar()
         self.model = tk.StringVar()
 
-        presets = ttk.LabelFrame(parent, text="Presets (move every slider below)")
+        presets = ttk.LabelFrame(parent, text="Presets (network only — repair, FEC and bitrate stay as set)")
         presets.pack(fill="x", padx=6, pady=4)
         for name in PRESETS:
             ttk.Button(presets, text=name, command=lambda n=name: self.apply_preset(n)).pack(
