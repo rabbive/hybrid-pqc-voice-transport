@@ -7,11 +7,10 @@ import socket
 import threading
 
 import numpy as np
-import opuslib
 import pytest
 
 from hpqv import handshake as h, packet
-from hpqv.audio import FRAME_SAMPLES, OpusCodec
+from hpqv.audio import FRAME_SAMPLES, OpusCodec, _encoder_get
 from hpqv.demo import Stats, _receiver_loop
 from hpqv.eval.fec_recovery import _frames, _segmental_snr_db, _test_signal
 from hpqv.playout import MAX_GAP, Playout
@@ -69,17 +68,15 @@ def test_recovered_frame_comes_from_the_next_packets_fec_decode():
 
 
 def _opus_ctls_work():
-    """opuslib calls the variadic opus_encoder_ctl through ctypes; on Apple arm64
-    that ABI mismatch makes every CTL fail, so in-band FEC is silently off there."""
+    """Check that the encoder's in-band FEC setting can be read back."""
     try:
-        opuslib.api.encoder.encoder_ctl(
-            OpusCodec().enc.encoder_state, opuslib.api.ctl.get_inband_fec)
-    except opuslib.OpusError:
+        codec = OpusCodec()
+        return _encoder_get(codec.enc, 4013) == 1
+    except RuntimeError:
         return False
-    return True
 
 
-@pytest.mark.skipif(not _opus_ctls_work(), reason="opus CTLs unusable on this platform")
+@pytest.mark.skipif(not _opus_ctls_work(), reason="in-band FEC CTL unavailable on this platform")
 def test_recovered_frames_beat_zero_frames():
     """Same metric as the offline experiment: segmental SNR vs the undamaged decode."""
     packets = _packets()

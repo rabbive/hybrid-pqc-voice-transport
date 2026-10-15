@@ -111,8 +111,8 @@ where recovery can act.
 - Whether `decode_fec` returns real LBRR data or just concealment depends on the encoder having
   picked a SILK/hybrid mode. On the synthetic chirp the encoder picks CELT, where `decode_fec`
   output is identical to plain concealment, so part of the gain above may be concealment, not
-  LBRR. On Apple arm64 the opuslib CTLs (including inband FEC) also fail through ctypes' variadic
-  call ABI, so FEC is silently off there; Linux/x86_64 is unaffected.
+  LBRR. Apple arm64 FEC is fixed with a padded variadic call; the saved results came from the Linux
+  container.
 - 3-second synthetic chirp, not real speech. It exercises the codec across a frequency sweep but
   is not a substitute for a MOS-style listening test.
 
