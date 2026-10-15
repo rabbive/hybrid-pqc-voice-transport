@@ -23,6 +23,10 @@ class OpusCodec:
     def decode(self, data: bytes, decode_fec: bool = False) -> bytes:
         return self.dec.decode(data, FRAME_SAMPLES, decode_fec)
 
+    def conceal(self) -> bytes:
+        """Opus packet-loss concealment: decoding no data extrapolates the last frame."""
+        return self.dec.decode(b"", FRAME_SAMPLES)
+
 def wav_frames(path: str):
     with wave.open(path, "rb") as w:
         while True:

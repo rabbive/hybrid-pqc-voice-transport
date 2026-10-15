@@ -27,9 +27,9 @@ def recv_stream(udp_sock, session, expected: int) -> list[bytes]:
         seq, _flags, opus = packet.open_(key, recv_prefix, dg)
         jb.push(seq, opus)
         got += 1
-        frame = jb.pop()
-        if frame is not None:
-            out.append(codec.decode(frame))
-    for frame in jb.flush():
+        popped = jb.pop()
+        if popped is not None:
+            out.append(codec.decode(popped[1]))
+    for _seq, frame in jb.flush():
         out.append(codec.decode(frame))
     return out

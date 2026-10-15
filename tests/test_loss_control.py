@@ -73,6 +73,6 @@ def test_sender_honours_a_mid_call_loss_change():
         tx.close()
         sink.close()
 
-    sent, _received, dropped = stats.snapshot()
+    sent, _received, dropped, _recovered = stats.snapshot()
     assert sent == 50, f"expected 50 sent before the flip, got {sent}"
     assert dropped == 50, f"expected 50 dropped after the flip, got {dropped}"

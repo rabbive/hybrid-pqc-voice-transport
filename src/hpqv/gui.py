@@ -226,9 +226,9 @@ class DemoWindow:
                 self.start_btn.state(["!disabled"])
                 self.stop_btn.state(["disabled"])
 
-        sent, received, dropped = self.stats.snapshot()
+        sent, received, dropped, recovered = self.stats.snapshot()
         self.counters.config(
-            text=f"sent {sent}    received {received}    dropped {dropped}")
+            text=f"sent {sent}    received {received}    dropped {dropped}    recovered {recovered}")
         tx, rx = self.stats.levels()
         self.tx_meter["value"] = tx * 100
         self.rx_meter["value"] = rx * 100
