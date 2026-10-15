@@ -1,116 +1,117 @@
-"""A small control window for the hpqv voice demo.
+"""Live-demo window for the hpqv voice call.
 
-This is a shell around the same call machinery `hpqv.demo` uses on the command
-line -- it does not reimplement the transport. The point of the window is the
-loss slider: it changes packet drop *while the call is running*, so a live
-audience hears the transport degrade and recover without hanging up.
+A shell around the same call machinery `hpqv.demo` uses on the command line --
+it does not reimplement the transport. Every control changes the running call
+(via CallControls / CallHandle) and every effect shows up in the live stats and
+the scrolling graph, so an audience sees cause and effect without hanging up.
 
     python -m hpqv.gui
 
+Layout: left column is a notebook (Call / Network / Security) for the controls,
+right column (always visible) holds live stats and the graph.
+
 Everything runs off the main thread except tkinter itself: the call lives in
 worker threads and the UI polls shared state on an `after()` timer, because
-touching widgets from a worker thread is the classic way to crash tkinter.
+touching widgets (or Tk variables) from a worker thread is the classic way to
+crash tkinter. Telemetry is sampled from that same timer, once a second.
 """
 import queue
 import socket
 import struct
 import threading
+import time
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
 from hpqv import control, demo
+from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
+from hpqv.gui_graph import GraphCanvas, SERIES
+from hpqv.gui_network import NetworkPanel
+from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
+                             StatsPanel)
+from hpqv.telemetry import Telemetry
 
 POLL_MS = 200
+SAMPLE_S = 1.0           # telemetry cadence
+ACCEPT_TICK = 0.5        # how often a listening worker checks for Hang up
 
 
 class DemoWindow:
-    def __init__(self, root):
+    def __init__(self, root, clock=time.monotonic):
         self.root = root
+        self._clock = clock
         root.title("hpqv — post-quantum voice demo")
-        root.geometry("540x470")
+        root.geometry("1280x700")
+        root.minsize(1100, 640)
+        self._style()
 
         self.stats = demo.Stats()
         self.controls = CallControls()
         self.stop_event = threading.Event()
+        self.call_handle = CallHandle()
+        self.telemetry = None
         self.events = queue.Queue()        # worker -> UI messages
         self.worker = None
-        self.identity_path = tk.StringVar(value="")
-        self.mode = tk.StringVar(value="listen")
-        self.port = tk.StringVar(value="9000")
-        self.target = tk.StringVar(value="192.168.1.42:9000")
-
+        self._live = False                 # call connected: sample telemetry, allow rotate
+        self._hung_up = False
+        self._t0 = self._last_sample = 0.0
         self._build()
         self.root.after(POLL_MS, self._poll)
+
+    def _style(self):
+        base = tkfont.nametofont("TkDefaultFont")
+        base.configure(size=12)            # readable from the back of a room
+        tkfont.nametofont("TkFixedFont").configure(size=12)
+        style = ttk.Style()
+        style.configure("Value.TLabel", font=base.copy().actual() | {"weight": "bold"})
+        style.configure("Mono.TLabel", font=tkfont.nametofont("TkFixedFont"))
+        style.configure("State.TLabel", font=base.copy().actual() | {"weight": "bold", "size": 14})
 
     # ---------------- layout ----------------
 
     def _build(self):
-        pad = {"padx": 8, "pady": 4}
-
-        conn = ttk.LabelFrame(self.root, text="Connection")
-        conn.pack(fill="x", **pad)
-        ttk.Radiobutton(conn, text="Listen on port", variable=self.mode,
-                        value="listen", command=self._sync_mode).grid(row=0, column=0, sticky="w")
-        self.port_entry = ttk.Entry(conn, textvariable=self.port, width=10)
-        self.port_entry.grid(row=0, column=1, sticky="w")
-        ttk.Radiobutton(conn, text="Call", variable=self.mode,
-                        value="call", command=self._sync_mode).grid(row=1, column=0, sticky="w")
-        self.target_entry = ttk.Entry(conn, textvariable=self.target, width=22)
-        self.target_entry.grid(row=1, column=1, sticky="w")
-
-        ident = ttk.Frame(conn)
-        ident.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
-        ttk.Label(ident, text="Identity:").pack(side="left")
-        ttk.Entry(ident, textvariable=self.identity_path, width=24).pack(side="left", padx=4)
-        ttk.Button(ident, text="…", width=3, command=self._pick_identity).pack(side="left")
-        ttk.Button(ident, text="Create identity", command=self._create_identity).pack(side="left", padx=4)
-        ttk.Label(conn, text="Create once, then privately copy the identity file to your other computer.").grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=4)
-
-        btns = ttk.Frame(self.root)
-        btns.pack(fill="x", **pad)
-        self.start_btn = ttk.Button(btns, text="Start", command=self._start)
+        top = ttk.Frame(self.root)
+        top.pack(fill="x", padx=8, pady=6)
+        self.start_btn = ttk.Button(top, text="Start", command=self._start)
         self.start_btn.pack(side="left")
-        self.stop_btn = ttk.Button(btns, text="Hang up", command=self._stop, state="disabled")
+        self.stop_btn = ttk.Button(top, text="Hang up", command=self._stop, state="disabled")
         self.stop_btn.pack(side="left", padx=6)
+        self.export_btn = ttk.Button(top, text="Export session…", command=self._export)
+        self.export_btn.pack(side="left", padx=6)
+        self.state_label = ttk.Label(top, text="idle", style="State.TLabel")
+        self.state_label.pack(side="left", padx=14)
 
-        self.state_label = ttk.Label(self.root, text="idle", font=("", 13, "bold"))
-        self.state_label.pack(anchor="w", **pad)
+        body = ttk.Frame(self.root)
+        body.pack(fill="both", expand=True)
+        self.tabs = left = ttk.Notebook(body)
+        left.pack(side="left", fill="y", padx=(8, 4), pady=2)
+        right = ttk.Frame(body)
+        right.pack(side="left", fill="both", expand=True, padx=(4, 8))
 
-        loss_box = ttk.LabelFrame(self.root, text="Packet loss injection (live)")
-        loss_box.pack(fill="x", **pad)
-        self.loss_label = ttk.Label(loss_box, text="0 %")
-        self.loss_label.pack(anchor="w", padx=6)
-        self.loss_scale = ttk.Scale(loss_box, from_=0, to=50, orient="horizontal",
-                                    command=self._on_loss)
-        self.loss_scale.pack(fill="x", padx=6, pady=(0, 6))
+        call_tab, net_tab, sec_tab = (ttk.Frame(left) for _ in range(3))
+        left.add(call_tab, text="Call")
+        left.add(net_tab, text="Network")
+        left.add(sec_tab, text="Security")
+        self.conn = ConnectionPanel(call_tab, self._create_identity)
+        self.handshake_panel = HandshakePanel(call_tab, _handshake_info())
+        self.network = NetworkPanel(net_tab, self.controls)
+        self.security = SecurityPanel(sec_tab, self._rotate)
 
-        meters = ttk.LabelFrame(self.root, text="Audio level")
-        meters.pack(fill="x", **pad)
-        ttk.Label(meters, text="out").grid(row=0, column=0, padx=4)
-        self.tx_meter = ttk.Progressbar(meters, maximum=100, length=330)
-        self.tx_meter.grid(row=0, column=1, pady=2)
-        ttk.Label(meters, text="in").grid(row=1, column=0, padx=4)
-        self.rx_meter = ttk.Progressbar(meters, maximum=100, length=330)
-        self.rx_meter.grid(row=1, column=1, pady=2)
+        self.stats_panel = StatsPanel(right)
+        graph_box = ttk.LabelFrame(right, text="Last 60 s")
+        graph_box.pack(fill="both", expand=True, padx=6, pady=4)
+        legend = ttk.Frame(graph_box)
+        legend.pack(fill="x")
+        for s in SERIES:
+            tk.Label(legend, text="━ " + s.name, fg=s.color).pack(side="left", padx=8)
+        self.graph = GraphCanvas(graph_box, height=260)
+        self.graph.pack(fill="both", expand=True, padx=4, pady=4)
+        self.export_label = ttk.Label(right, text="", wraplength=640, justify="left")
+        self.export_label.pack(fill="x", padx=6, pady=(0, 4))
 
-        self.counters = ttk.Label(self.root, text="sent 0    received 0    dropped 0")
-        self.counters.pack(anchor="w", **pad)
-        self._sync_mode()
-
-    def _sync_mode(self):
-        listening = self.mode.get() == "listen"
-        self.port_entry.state(["!disabled"] if listening else ["disabled"])
-        self.target_entry.state(["disabled"] if listening else ["!disabled"])
-
-    def _pick_identity(self):
-        path = filedialog.askopenfilename(title="identity.json",
-                                          filetypes=[("JSON", "*.json"), ("All", "*")])
-        if path:
-            self.identity_path.set(path)
-
-    # ---------------- call control ----------------
+    # ---------------- identity ----------------
 
     def _create_identity(self):
         path = filedialog.asksaveasfilename(
@@ -125,26 +126,23 @@ class DemoWindow:
         except Exception as exc:
             messagebox.showerror("Could not create identity", str(exc))
         else:
-            self.identity_path.set(path)
+            self.conn.identity.set(path)
             self.state_label.config(text="identity saved; copy it privately to your other computer")
 
-    def _on_loss(self, value):
-        pct = float(value)
-        self.controls.set(loss_pct=pct)
-        self.loss_label.config(text=f"{pct:.0f} %")
+    # ---------------- call control ----------------
 
-    def _args(self, identity_file):
+    def _args(self, cfg):
         """The same argument object the CLI builds, so one code path serves both."""
         class A:
             pass
         a = A()
-        a.identity_file = identity_file
-        a.input, a.wav = "mic", None
+        a.identity_file = cfg["identity"]
+        a.input, a.wav = cfg["input"], cfg["wav"]
         a.output, a.out_wav = "speaker", None
-        a.record_wav = None
+        a.record_wav = cfg["record_wav"]
         a.drop_pct = self.controls.get("loss_pct")
-        a.seconds = 3600          # run until Hang up
-        a.jitter_depth = 3
+        a.seconds = 3600          # run until Hang up (a WAV ends the call at EOF)
+        a.jitter_depth = self.controls.get("jitter_depth")
         return a
 
     def _start(self):
@@ -153,68 +151,123 @@ class DemoWindow:
         # Read every tk variable HERE, on the main thread. Tk variables are Tcl
         # calls, so reading them from the worker raises "main thread is not in
         # main loop" -- the same rule as widgets, which is easy to miss.
-        self._cfg = {
-            "mode": self.mode.get(),
-            "port": int(self.port.get()),
-            "target": self.target.get(),
-            "identity": self.identity_path.get(),
-        }
-        self.stop_event = threading.Event()
-        self.stats = demo.Stats()
+        try:
+            cfg = self.conn.read()
+        except ValueError as exc:
+            messagebox.showerror("Cannot start", str(exc))
+            return
+        cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle())
+        self.stop_event, self.stats, self.call_handle = cfg["stop"], cfg["stats"], cfg["handle"]
+        self._hung_up = False
         self.start_btn.state(["disabled"])
         self.stop_btn.state(["!disabled"])
-        self.worker = threading.Thread(target=self._run, daemon=True)
+        self.conn.set_locked(True)
+        self.worker = threading.Thread(target=self._run, args=(cfg,), daemon=True)
         self.worker.start()
 
     def _stop(self):
-        self.stop_event.set()
+        """Hang up through the handle so the peer's call ends too."""
+        self._hung_up = True
         self.stop_btn.state(["disabled"])
-        self.start_btn.state(["!disabled"])
-        self.events.put(("state", "hung up"))
+        self.call_handle.hang_up()
+        self.stop_event.set()              # also frees a worker still waiting in accept()
+        self.state_label.config(text="hanging up…")
 
-    def _run(self):
-        """Worker thread: set up the connection, then hand off to demo._run_call."""
+    def _rotate(self):
         try:
-            cfg = self._cfg                     # plain values, captured on the main thread
-            args = self._args(cfg["identity"])
+            gen = self.call_handle.rotate_keys()
+        except RuntimeError as exc:
+            self.state_label.config(text=str(exc))
+        else:
+            self.state_label.config(text=f"keys rotated → generation {gen}")
+
+    def _accept(self, srv, stop):
+        """accept() that notices Hang up: a plain accept() would block forever."""
+        srv.settimeout(ACCEPT_TICK)
+        while not stop.is_set():
+            try:
+                conn, addr = srv.accept()
+            except socket.timeout:
+                continue
+            conn.settimeout(None)
+            return conn, addr
+        return None, None
+
+    def _run(self, cfg):
+        """Worker thread: set up the connection, then hand off to demo._run_call."""
+        srv = conn = udp = None
+        stats, stop, handle = cfg["stats"], cfg["stop"], cfg["handle"]
+        put = self.events.put
+        try:
+            args = self._args(cfg)
             if cfg["mode"] == "listen":
-                self.events.put(("state", f"listening on {cfg['port']}…"))
+                put(("state", f"listening on {cfg['port']}…"))
                 sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "listener")
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 srv.bind(("0.0.0.0", cfg["port"]))
                 srv.listen(1)
-                conn, addr = srv.accept()
-                self.events.put(("state", f"handshake with {addr[0]}…"))
-                session = control.run_responder(conn, sig_pub, sig_secret, peer_pub)
+                conn, addr = self._accept(srv, stop)
+                if conn is None:
+                    put(("state", "hung up"))
+                    return
+                put(("state", f"handshake with {addr[0]}…"))
+                session = demo.timed_handshake("responder", conn, sig_pub, sig_secret, peer_pub, stats)
                 udp = demo._open_bound_udp(cfg["port"])
                 _t, payload = control.recv_control(conn)
                 (peer_port,) = struct.unpack(">H", payload)
                 dest = (addr[0], peer_port)
             else:
                 host, port_s = cfg["target"].rsplit(":", 1)
-                self.events.put(("state", f"connecting to {host}…"))
+                put(("state", f"connecting to {host}…"))
                 sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "caller")
                 conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 conn.connect((host, int(port_s)))
-                self.events.put(("state", "handshake…"))
-                session = control.run_initiator(conn, sig_pub, sig_secret, peer_pub)
+                put(("state", "handshake…"))
+                session = demo.timed_handshake("initiator", conn, sig_pub, sig_secret, peer_pub, stats)
                 udp = demo._open_bound_udp(0)
                 control.send_control(conn, control.MSG_CALL_START,
                                      struct.pack(">H", udp.getsockname()[1]))
                 dest = (host, int(port_s))
 
-            self.events.put(("state", "connected — talk"))
-            demo._run_call(conn, udp, dest, session, args,
-                           stats=self.stats, controls=self.controls, stop_event=self.stop_event)
-            self.events.put(("state", "call ended"))
-            conn.close()
+            put(("connected", None))
+            put(("state", "connected — talk"))
+            demo._run_call(conn, udp, dest, session, args, stats=stats, controls=self.controls,
+                           stop_event=stop, call_handle=handle)
+            if self._hung_up:
+                put(("state", "hung up"))
+            else:                           # the peer ended it (or a WAV input finished)
+                put(("state", "call ended by peer" if cfg["input"] == "mic" else "call ended"))
         except Exception as e:                      # surface failures in the UI, not a dead thread
-            self.events.put(("state", f"error: {e}"))
+            put(("state", f"error: {e}"))
         finally:
-            self.events.put(("done", None))
+            for s in (conn, srv, udp):
+                if s is not None:
+                    s.close()
+            put(("done", None))
+
+    # ---------------- export ----------------
+
+    def _export(self):
+        if not self.telemetry or not self.telemetry.rows:
+            messagebox.showinfo("Nothing to export", "Telemetry starts once a call is connected "
+                                "and takes one sample per second.")
+            return
+        out_dir = filedialog.askdirectory(title="Export session to folder")
+        if not out_dir:
+            return
+        try:
+            paths = self.telemetry.export(out_dir)
+        except Exception as exc:        # e.g. matplotlib missing: say so, keep the demo alive
+            messagebox.showerror("Export failed", str(exc))
+            return
+        self.export_label.config(text="Exported:\n" + "\n".join(paths))
 
     # ---------------- UI refresh (main thread only) ----------------
+
+    def _sample(self):
+        self.telemetry.sample(self._clock() - self._t0)
+        self._last_sample = self._clock()
 
     def _poll(self):
         while True:
@@ -224,17 +277,37 @@ class DemoWindow:
                 break
             if kind == "state":
                 self.state_label.config(text=value)
+            elif kind == "connected":
+                self._live = True
+                self._t0 = self._last_sample = self._clock()
+                self.telemetry = Telemetry(self.stats, self.controls)
             elif kind == "done":
+                if self._live:
+                    self._sample()          # close the last partial interval for export
+                self._live = False
                 self.start_btn.state(["!disabled"])
                 self.stop_btn.state(["disabled"])
+                self.conn.set_locked(False)
 
-        sent, received, dropped, recovered = self.stats.snapshot()
-        self.counters.config(
-            text=f"sent {sent}    received {received}    dropped {dropped}    recovered {recovered}")
-        tx, rx = self.stats.levels()
-        self.tx_meter["value"] = tx * 100
-        self.rx_meter["value"] = rx * 100
+        if self._live and self._clock() - self._last_sample >= SAMPLE_S:
+            self._sample()
+        rows = self.telemetry.rows if self.telemetry else []
+        stats = self.stats.as_dict()
+        self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
+        self.handshake_panel.update(stats)
+        self.security.update(self._live, self.call_handle.key_generation(),
+                             self.call_handle.key_fingerprint())
+        if rows or self.telemetry:
+            self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
+                              self._clock() - self._t0)
         self.root.after(POLL_MS, self._poll)
+
+
+def _handshake_info():
+    try:
+        return demo.handshake_info()
+    except Exception:                  # liboqs missing: the panel says so instead of blocking the window
+        return None
 
 
 def main():
