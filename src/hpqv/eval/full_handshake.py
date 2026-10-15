@@ -64,10 +64,11 @@ def run_tcp(ids, deadline_s) -> tuple[bool, float]:
         initiator = socket.create_connection(listener.getsockname(), timeout=remaining)
         result = control.run_initiator(
             _DeadlineSocket(initiator, deadline), *ids[0], ids[1][0])
-        thread.join(_remaining(deadline))
-        ok = (not thread.is_alive() and time.monotonic() <= deadline and
+        finished = time.monotonic()
+        thread.join(0.1)
+        ok = (finished <= deadline and
               _matches(result, server.get("session", (None, None, None))))
-        return ok, (time.monotonic() - start) * 1000
+        return ok, (finished - start) * 1000
     except (OSError, TimeoutError, ValueError, ConnectionError):
         return False, (time.monotonic() - start) * 1000
     finally:
@@ -77,7 +78,7 @@ def run_tcp(ids, deadline_s) -> tuple[bool, float]:
         for conn in accepted:
             conn.close()
         if thread is not None:
-            thread.join()
+            thread.join(0.1)
 
 
 def _accept_for_hello(hello, peer_sig_pub, sig_secret, cache):
@@ -129,8 +130,8 @@ def run_udp(ids, deadline_s, retry: bool, rto_s=0.25) -> tuple[bool, float]:
                         return
                     continue
                 accept, session = _accept_for_hello(hello, ids[0][0], ids[1][1], cache)
-                _send_udp(server, accept, addr, deadline)
                 result["session"] = session
+                _send_udp(server, accept, addr, deadline)
         except Exception:
             pass
 
@@ -158,11 +159,12 @@ def run_udp(ids, deadline_s, retry: bool, rto_s=0.25) -> tuple[bool, float]:
             if peer != addr:
                 continue
             initiated = handshake.finish(reply, kem, kem_pub, ids[1][0])
+            finished = time.monotonic()
             done.set()
-            thread.join(_remaining(deadline))
-            ok = (not thread.is_alive() and time.monotonic() <= deadline and
+            thread.join(0.1)
+            ok = (finished <= deadline and
                   _matches(initiated, result.get("session", (None, None, None))))
-            return ok, (time.monotonic() - start) * 1000
+            return ok, (finished - start) * 1000
     except (OSError, TimeoutError, ValueError):
         return False, (time.monotonic() - start) * 1000
     finally:
@@ -170,7 +172,7 @@ def run_udp(ids, deadline_s, retry: bool, rto_s=0.25) -> tuple[bool, float]:
         client.close()
         server.close()
         if thread is not None:
-            thread.join()
+            thread.join(0.1)
 
 
 def measure(transport, attempts, deadline_s) -> dict:
