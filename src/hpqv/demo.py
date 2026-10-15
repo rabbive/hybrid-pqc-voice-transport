@@ -9,9 +9,11 @@ import threading
 import time
 import wave
 
-from hpqv import control, handshake as h, packet
+from hpqv import control, handshake as h
 from hpqv.audio import OpusCodec, FRAME_SAMPLES, FRAME_BYTES, FS, CHANNELS
+from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
+from hpqv.keyring import Keyring
 
 STATUS_INTERVAL = 1.0
 
@@ -220,7 +222,7 @@ def _rms(pcm: bytes) -> float:
 
 
 def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
-    key, send_prefix, _recv_prefix = session
+    ring = Keyring.of(session)
     codec = OpusCodec()
     seq = 0
     try:
@@ -237,7 +239,7 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
                     stats.dropped += 1
                 seq += 1
                 continue
-            dg = packet.seal(key, send_prefix, seq, opus)
+            dg = ring.seal(seq, opus)
             udp_sock.sendto(dg, dest)
             with stats.lock:
                 stats.sent += 1
@@ -249,7 +251,7 @@ def _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event):
 def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
     from hpqv.jitter import JitterBuffer
     from hpqv.playout import Playout
-    key, _send_prefix, recv_prefix = session
+    ring = Keyring.of(session)
     codec = OpusCodec()
     jb = JitterBuffer(depth=controls.get("jitter_depth"))
     playout = Playout(codec)
@@ -274,7 +276,7 @@ def _receiver_loop(udp_sock, session, sink, controls, stats, stop_event):
         except OSError:
             break
         try:
-            seq, _flags, opus = packet.open_(key, recv_prefix, dg)
+            seq, _flags, opus = ring.open_(dg)
         except Exception:
             continue
         jb.push(seq, opus)
@@ -297,15 +299,18 @@ def _status_loop(stats, controls, stop_event):
 
 
 def _run_call(sock_tcp, udp_sock, dest, session, args,
-              stats=None, controls=None, stop_event=None):
+              stats=None, controls=None, stop_event=None, call_handle=None):
     """Run a call. The GUI passes in its own stats/controls/stop_event so it can
-    watch the counters and turn the knobs while the call is live."""
+    watch the counters and turn the knobs while the call is live, and a
+    call_handle to rotate keys or hang up. Either side ending ends both."""
     source = FrameSource(args.input, wav_path=args.wav, seconds=args.seconds)
     sink = FrameSink(args.output, wav_path=args.out_wav)
     stats = stats if stats is not None else Stats()
     controls = controls if controls is not None else CallControls(
         loss_pct=args.drop_pct, jitter_depth=args.jitter_depth)
     stop_event = stop_event if stop_event is not None else threading.Event()
+    call_handle = call_handle if call_handle is not None else CallHandle()
+    ring = call_handle.start(sock_tcp, session, stats, stop_event)
 
     if controls.get("loss_pct") > 0:
         print(f"loss injection active: dropping {controls.get('loss_pct')}% of outgoing packets")
@@ -313,17 +318,18 @@ def _run_call(sock_tcp, udp_sock, dest, session, args,
     status_thread = threading.Thread(target=_status_loop, args=(stats, controls, stop_event))
     recv_thread = threading.Thread(
         target=_receiver_loop,
-        args=(udp_sock, session, sink, controls, stats, stop_event))
+        args=(udp_sock, ring, sink, controls, stats, stop_event))
     status_thread.start()
     recv_thread.start()
 
     try:
-        _sender_loop(udp_sock, dest, session, source, controls, stats, stop_event)
+        _sender_loop(udp_sock, dest, ring, source, controls, stats, stop_event)
         if args.input == "file":
             # let receiver drain remaining in-flight datagrams
             time.sleep(0.5)
     finally:
         stop_event.set()
+        call_handle.finish()
         recv_thread.join(timeout=2)
         status_thread.join(timeout=2)
         source.close()
