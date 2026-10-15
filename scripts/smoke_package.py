@@ -15,6 +15,32 @@ import time
 import wave
 
 
+def has_display():
+    if sys.platform == "win32":
+        return True
+    if sys.platform == "darwin":   # Tk aborts (and macOS shows crash dialogs) outside a GUI session
+        out = subprocess.run(["launchctl", "managername"], capture_output=True, text=True)
+        return out.stdout.strip() == "Aqua"
+    return bool(os.environ.get("DISPLAY"))
+
+
+def smoke_gui(package, env):
+    """Launch the real GUI entry point; it closes itself after 3 s."""
+    gui = (package / "HPQV.app/Contents/MacOS/HPQV" if sys.platform == "darwin"
+           else package / "HPQV" / "HPQV.exe")
+    if not gui.is_file():
+        raise RuntimeError(f"Packaged GUI missing: {gui}")
+    if not has_display():
+        print("SKIP gui: no display available")
+        return
+    start = time.monotonic()
+    done = subprocess.run([str(gui)], env={**env, "HPQV_SELFTEST_SECONDS": "3"}, timeout=60)
+    elapsed = time.monotonic() - start
+    if done.returncode or elapsed < 2.5:
+        raise RuntimeError(f"GUI exit {done.returncode} after {elapsed:.1f}s")
+    print(f"PASS gui: window opened and closed cleanly after {elapsed:.1f}s")
+
+
 def smoke(executable):
     executable = Path(executable).resolve()
     if not executable.is_file():
@@ -30,6 +56,13 @@ def smoke(executable):
     # Remove developer tools/library paths. A frozen app must stand alone.
     env["PATH"] = (str(Path(env.get("SYSTEMROOT", "C:/Windows")) / "System32")
                    if sys.platform == "win32" else "/usr/bin:/bin")
+    selfcheck = subprocess.run([str(executable), "selfcheck"], env=env, timeout=120,
+                               capture_output=True, text=True)
+    print(selfcheck.stdout, end="")
+    if selfcheck.returncode:
+        print(selfcheck.stderr, file=sys.stderr)
+        raise RuntimeError("Frozen self-check failed")
+    smoke_gui(package, env)
     with tempfile.TemporaryDirectory(prefix="hpqv packaged test ") as tmp:
         work = Path(tmp)
         subprocess.run([str(executable), "keygen", "--out", str(work / "identity.json")],
