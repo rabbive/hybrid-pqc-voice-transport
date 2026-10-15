@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 hpqv = "hpqv:main"
+hpqv-gui = "hpqv.gui:main"
 
 [build-system]
 requires = ["hatchling"]

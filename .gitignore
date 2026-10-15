@@ -4,3 +4,6 @@ __pycache__/
 .pytest_cache/
 .superpowers/
 dist/
+.build/
+identity.json
+.DS_Store
