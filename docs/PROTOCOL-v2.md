@@ -71,14 +71,40 @@ UDP voice both ways, keys from the TLS exporter
 ```
 
 The TLS handshake is exactly what OpenSSL runs. No handshake message is built
-by this code. The application checks, in this order:
+by this code.
+
+**What is offered.** Both offers are restricted on the OpenSSL context, so the
+ClientHello lists one group and one signature algorithm, with one key share:
+
+- `supported_groups = [0x11EC]`, with a 1,216 B key share (ML-KEM-768 ek, then X25519).
+- `signature_algorithms = [0x0905]`.
+
+This uses pyOpenSSL's private bindings `SSL_CTX_set1_curves_list` and
+`SSL_CTX_set1_sigalgs_list`, since there is no public setter. If either call
+fails, the context is refused, so OpenSSL's defaults are never used. The
+ServerHello key share is 1,120 B (ML-KEM-768 ciphertext, then X25519).
+
+A peer without X25519MLKEM768 fails inside the handshake (TLS alert
+`handshake_failure`, reason `tls_error`). Before the 2026-10-16 B1 fix, the
+ClientHello also offered 10 other groups and a classical X25519 share, and a
+classical peer was refused only after the handshake.
+
+Verified:
+- on the wire, by `tests/test_t6_regressions.py::test_t6_clienthello_offers_only_x25519mlkem768_and_mldsa65`;
+- against Go's independent TLS stack, by `tests/test_interop_go.py`.
+
+The application then checks, in this order:
 
 1. Negotiated protocol is `TLSv1.3` (TLS 1.3 only, no ticket, no resumption).
 2. `Connection.get_group_name()` is `"X25519MLKEM768"`. Anything else closes
-   the connection with reason `wrong_group`.
+   the connection with reason `wrong_group`. This is the backstop if the offer
+   restriction were ever lost (`test_post_handshake_group_check_is_the_backstop`).
 3. ALPN is `hpqv/2`. Otherwise `alpn_mismatch`.
 4. The peer's certificate public key is byte-equal to the pinned key (checked
    in the verify callback). Otherwise `bad_peer_cert`.
+5. Before any TLS byte, a pinned key equal to our own identity's key is refused
+   (`bad_peer_cert`). Copying one identity onto both machines would bring back
+   v1 finding F1.
 
 **Why MSG_READY exists.** In TLS 1.3 the client sends its Finished and
 considers the handshake complete before the server has checked the client's
@@ -89,14 +115,19 @@ start media until it has received it. A client that gets an alert or a close
 instead of `MSG_READY` fails with `peer_closed` or `not_ready`.
 
 **v1 peers.** A v1 peer's first bytes are a 4-byte length followed by version
-`0x01`, which is not a TLS record. The connection fails as `protocol_v1_peer`
-where it can be recognised, otherwise as `tls_error`. There is no fallback.
+`0x01`, which is not a TLS record. A v2 **listener** detects it from the first
+byte and fails with `protocol_v1_peer`. A v2 **caller** dialling a v1 listener
+fails with `timeout`: the v1 listener reads the TLS record header as a length
+and waits. There is no fallback in either direction.
 
 **Handshake size.** v1 was 10,844 bytes of handshake payload. A CLI probe of the
 v2-style TLS handshake with ML-DSA-65 self-signed certificates (`openssl
 s_client`) read 10,318 and wrote 10,361 bytes, about 20.7 KB in total including
-TLS framing. This has **not** been measured in the app yet; the app figure is
-`SecureChannel.handshake_bytes`.
+TLS framing. In the app, `SecureChannel.handshake_bytes` measured 20,714 B in
+both directions together (two-process CLI call on 2026-10-16, before the B1
+offer restriction). The B1 change removes the 32 B classical key share and the
+extra group and signature IDs, so the figure is now slightly lower; it has not
+been re-measured.
 
 ## 4. Identity model
 

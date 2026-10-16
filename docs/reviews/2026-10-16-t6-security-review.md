@@ -70,3 +70,24 @@ I found no way to break authentication or key secrecy in the v1→v2 diff. Pinni
 - **SAS:** is 32 bits enough, given it only backs up the pin?
 - **ML-DSA in TLS:** the mldsa65 codepoint is still a draft; also needed are OpenSSL 4.0.2's hybrid-group implementation and broader ACVP coverage.
 - **No formal model** exists for how TLS, READY, the exporter keys and the UDP layer fit together.
+
+---
+
+## Disposition (coordinator, 2026-10-16)
+
+| T6 item | Disposition |
+|---|---|
+| 1. Windows WSAEMSGSIZE ends the call | **Fixed**, 61eadd1. 65535 B receive buffer; WSAEMSGSIZE/WSAECONNRESET never end the call; `SIO_UDP_CONNRESET` off. Tested with fakes only (no Windows host) |
+| 2. Same identity on both machines accepted | **Fixed**, 61eadd1, in `establish` and in the CLI/GUI loader |
+| 3. Classical groups and signature algorithms offered in ClientHello | **Fixed**, 61eadd1. Only `0x11EC` and `0x0905` are offered (verified on the wire and against Go); the post-handshake check is kept |
+| 4. `media_keys()` reusable, so (key, nonce) could repeat | **Fixed**, 61eadd1. Single use, behind its own lock |
+| 5. World-readable key accepted | **Fixed**, 61eadd1. POSIX owner plus 0o077 check; Windows ACL set on save and checked on load, failing closed. Windows path tested with fakes only |
+| 6. A stray connection uses up the one-shot listener | **Open.** Deferred to the B2 pairing listener design |
+| Docs §3, groups and signature algorithms | **Fixed** in PROTOCOL-v2 §3 (now true) |
+| Docs §3, v2 caller vs v1 listener | **Fixed** in PROTOCOL-v2 §3 |
+| Docs §7.1, §9, §12 wording; status line | **Open.** Phase B docs task |
+| `SSL.Error` from `bio_write` / READY send can escape `establish` | **Open.** Not reproduced by T6 or here |
+| `test_demo_does_not_import_liboqs_or_the_v1_handshake` checks a dead module name | **Open.** The static grep test in `tests/eval` covers it |
+| Questions for a human cryptographer | Unchanged. Listed in `docs/reviews/2026-10-16-b1-verification.md` §8 of the B1 report |
+
+Verification record: [2026-10-16-b1-verification.md](2026-10-16-b1-verification.md).
