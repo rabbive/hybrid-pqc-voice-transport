@@ -251,6 +251,19 @@ def test_client_requires_server_to_select_alpn():
 
 
 def test_wrong_group_is_refused_by_client_and_server():
+    """We offer only X25519MLKEM768, so a P-256-only peer fails inside the handshake."""
+    res = _ours_vs_raw("client", _raw_ctx(SERVER, server=True, alpn=secure.ALPN,
+                                          p256_only=True), SERVER.cert_pem)
+    _assert_fail(res, "tls_error")
+    res = _ours_vs_raw("server", _raw_ctx(CLIENT, alpn=secure.ALPN, p256_only=True),
+                       CLIENT.cert_pem)
+    _assert_fail(res, "tls_error")
+
+
+def test_post_handshake_group_check_is_the_backstop(monkeypatch):
+    """If the group restriction were ever lost (private binding gone), the runtime check
+    still refuses a non-hybrid group after the handshake."""
+    monkeypatch.setattr(secure._lib, "SSL_CTX_set1_curves_list", lambda ctx, groups: 1)
     res = _ours_vs_raw("client", _raw_ctx(SERVER, server=True, alpn=secure.ALPN,
                                           p256_only=True), SERVER.cert_pem)
     _assert_fail(res, "wrong_group")

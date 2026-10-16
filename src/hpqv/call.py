@@ -1,7 +1,9 @@
 """Minimal one-way voice helpers over a Keyring (no live controls, no GUI)."""
+import socket
 import time
 
 from hpqv import packet
+from hpqv.udp import UDP_RECV_BUFFER, is_oversize_error
 from hpqv.audio import OpusCodec
 from hpqv.jitter import JitterBuffer
 
@@ -28,8 +30,14 @@ def recv_stream(udp_sock, ring, expected: int) -> list[bytes]:
     udp_sock.settimeout(IDLE_TIMEOUT)
     while got < expected and time.monotonic() < stop_at:
         try:
-            dg, _ = udp_sock.recvfrom(packet.MAX_DATAGRAM + 1)
-        except OSError:
+            dg, _ = udp_sock.recvfrom(UDP_RECV_BUFFER)
+        except socket.timeout:
+            break
+        except ConnectionResetError:
+            continue                 # spoofable ICMP on Windows; see demo._receiver_loop
+        except OSError as e:
+            if is_oversize_error(e):
+                continue
             break
         try:
             seq, _flags, opus = ring.open_(dg)

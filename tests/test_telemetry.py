@@ -323,14 +323,16 @@ def test_speaker_backlog_is_bounded_and_skips_are_counted(monkeypatch):
     sink.close()
 
 
-def test_receiver_socket_error_ends_the_call():
-    """Windows reports a dead peer as WSAECONNRESET on recvfrom: the call must end,
-    not leave the sender talking to nobody."""
+def test_receiver_dead_socket_ends_the_call():
+    """A socket that is really gone ends the call. (WSAECONNRESET no longer does: it
+    comes from a spoofable ICMP, so a dead peer is detected on the authenticated TCP
+    channel instead; see tests/test_t6_regressions.py.)"""
+    import errno
     from hpqv.demo import _receiver_loop
 
     class DeadSock:
         def settimeout(self, t): pass
-        def recvfrom(self, n): raise ConnectionResetError(10054, "WSAECONNRESET")
+        def recvfrom(self, n): raise OSError(errno.EBADF, "Bad file descriptor")
 
     stop = threading.Event()
     _receiver_loop(DeadSock(), rings()[0], _Sink(),

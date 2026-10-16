@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from cryptography import x509
 from cryptography.hazmat.primitives.asymmetric import mldsa
 from OpenSSL import SSL, crypto
+from OpenSSL.SSL import _lib
 
 from hpqv import identity
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 GROUP = "X25519MLKEM768"
 ALPN = b"hpqv/2"
 PROTOCOL = "TLSv1.3"
+SIGALG = b"mldsa65"         # TLS SignatureScheme 0x0905 (draft-ietf-tls-mldsa)
 HANDSHAKE_TIMEOUT = 10.0
 MAX_CONTROL_PAYLOAD = 1024
 
@@ -72,6 +74,14 @@ def _context(ident: identity.Identity, peer_cert_pem: bytes, role: str,
     # name (OpenSSL still sends stateful tickets; nothing can redeem them).
     ctx.set_options(SSL.OP_NO_TICKET)
     ctx.set_session_cache_mode(SSL.SESS_CACHE_OFF)
+    # Offer only the hybrid group and ML-DSA-65 from the first flight, so the ClientHello
+    # carries no classical key share and the server cannot pick anything else.
+    # ponytail: pyOpenSSL has no public setter, so this uses its private binding; the
+    # post-handshake group check in _check_negotiated stays as the backstop.
+    if _lib.SSL_CTX_set1_curves_list(ctx._context, GROUP.encode()) != 1:
+        raise RuntimeError(f"OpenSSL refused to restrict key exchange to {GROUP}")
+    if _lib.SSL_CTX_set1_sigalgs_list(ctx._context, SIGALG) != 1:
+        raise RuntimeError(f"OpenSSL refused to restrict signatures to {SIGALG.decode()}")
     ctx.use_certificate(x509.load_pem_x509_certificate(ident.cert_pem))
     with _WARNINGS_LOCK, warnings.catch_warnings():
         # pyOpenSSL rejects cryptography ML-DSA keys ("Unsupported key type"), so the key
@@ -113,6 +123,8 @@ class SecureChannel:
         self._closed = False
         self._broken = ""              # why the stream became unusable, if it did
         self._nbytes = 0
+        self._keys = None
+        self._keys_lock = threading.Lock()   # separate from _lock: never waits behind a send
         self.group = self.cipher = self.protocol = self.peer_fingerprint = ""
         self.handshake_ms = 0.0
         self.handshake_bytes = 0
@@ -124,6 +136,11 @@ class SecureChannel:
                   timeout: float = HANDSHAKE_TIMEOUT) -> "SecureChannel":
         if role not in ("client", "server"):
             raise ValueError(f"role must be 'client' or 'server', not {role!r}")
+        if identity.raw_public_key(peer_cert_pem) == identity.raw_public_key(ident.cert_pem):
+            # Pinning our own key means both machines share one identity: either could
+            # then impersonate the other, which is the v1 shared-file hole (F1).
+            sock.close()
+            raise HandshakeError("bad_peer_cert", "the peer certificate is this computer's own")
         t0 = time.perf_counter()
         deadline = time.monotonic() + timeout
         rejected: list = []
@@ -339,7 +356,16 @@ class SecureChannel:
                 self._conn.bio_write(data)
 
     def media_keys(self) -> MediaKeys:
-        return self._keys
+        """Hand the UDP media secrets out exactly once.
+
+        A second Keyring on the same secrets would restart seq at 0 and reuse
+        (key, nonce) pairs, so later calls raise instead of returning a copy.
+        """
+        with self._keys_lock:
+            keys, self._keys = self._keys, None
+        if keys is None:
+            raise RuntimeError("media keys already taken for this channel")
+        return keys
 
     def sas(self) -> str:
         return self._sas

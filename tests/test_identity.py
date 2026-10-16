@@ -55,6 +55,7 @@ def test_save_refuses_to_overwrite_either_file(tmp_path, existing):
 def test_load_rejects_key_that_does_not_match_cert(tmp_path):
     a, b = identity.new("a"), identity.new("b")
     (tmp_path / "a.key").write_bytes(a.key_pem)
+    os.chmod(tmp_path / "a.key", 0o600)          # about key contents, not permissions
     (tmp_path / "b.crt").write_bytes(b.cert_pem)
     with pytest.raises(ValueError):
         identity.load(str(tmp_path / "a.key"), str(tmp_path / "b.crt"))
@@ -65,6 +66,7 @@ def test_load_rejects_non_mldsa_key(tmp_path):
     (tmp_path / "ed.key").write_bytes(ed.private_bytes(
         serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8,
         serialization.NoEncryption()))
+    os.chmod(tmp_path / "ed.key", 0o600)         # about key type, not permissions
     (tmp_path / "ed.crt").write_bytes(_ed25519_cert(ed))
     with pytest.raises(ValueError):
         identity.load(str(tmp_path / "ed.key"), str(tmp_path / "ed.crt"))

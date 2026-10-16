@@ -14,6 +14,7 @@ from hpqv.callctl import CallHandle, POLL
 from hpqv.controls import CallControls
 from hpqv.impair import DelayLine, LossModel
 from hpqv.secure import HandshakeError, SecureChannel
+from hpqv.udp import UDP_RECV_BUFFER, is_oversize_error
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +68,12 @@ def keygen(args):
 
 def _load_identity(key_path, cert_path, peer_cert_path):
     """(Identity, peer certificate PEM). Raises identity.LegacyIdentityError for a v1 file."""
-    return identity.load(key_path, cert_path), identity.load_peer_cert(peer_cert_path)
+    me, peer = identity.load(key_path, cert_path), identity.load_peer_cert(peer_cert_path)
+    if identity.raw_public_key(peer) == identity.raw_public_key(me.cert_pem):
+        raise ValueError(
+            f"{peer_cert_path} is your own certificate. Each computer needs its own identity: "
+            "run keygen on each one and exchange only the .crt files.")
+    return me, peer
 
 
 def _identity_or_exit(args):
@@ -452,16 +458,20 @@ def _receiver_loop(udp_sock, ring, sink, controls, stats, stop_event, seed=None)
             if time.monotonic() >= drain_deadline:
                 break
         try:
-            # One byte over the cap: a longer datagram arrives as MAX_DATAGRAM + 1
-            # bytes and the keyring rejects it as oversize instead of seeing a
-            # silently truncated packet.
-            dg, _addr = udp_sock.recvfrom(packet.MAX_DATAGRAM + 1)
+            dg, _addr = udp_sock.recvfrom(UDP_RECV_BUFFER)
         except socket.timeout:
             if stop_event.is_set():
                 break
             continue
-        except OSError:
-            stop_event.set()         # dead socket (e.g. Windows WSAECONNRESET): end the call
+        except ConnectionResetError:
+            # Windows WSAECONNRESET comes from an ICMP port-unreachable, which anyone can
+            # spoof. It proves nothing about the peer; a dead peer ends the call through
+            # the authenticated TCP channel instead.
+            continue
+        except OSError as e:
+            if is_oversize_error(e):
+                continue             # one oversize datagram dropped by the OS; socket is fine
+            stop_event.set()         # the socket itself is gone (closed, EBADF): end the call
             break
         try:
             seq, flags, opus = ring.open_(dg)
