@@ -17,7 +17,6 @@ WORK = ROOT / ".build"
 PREFIX = WORK / "native"
 # Verified upstream release commits, not moving branches.
 SOURCES = {
-    "liboqs": ("https://github.com/open-quantum-safe/liboqs.git", "5a1a854b0dc9f2141bdc771c555ee60c37950183"),
     "opus": ("https://github.com/xiph/opus.git", "ddbe48383984d56acd9e1ab6a090c54ca6b735a6"),
 }
 
@@ -40,14 +39,8 @@ def build_native():
             # pinned commit is exactly v1.5.2 upstream; CMake derives the version from the tag.
             run("git", "-C", source, "tag", "-f", "v1.5.2", revision)
         options = ["-DBUILD_SHARED_LIBS=ON", "-DCMAKE_BUILD_TYPE=Release",
-                   f"-DCMAKE_INSTALL_PREFIX={PREFIX}"]
-        if name == "liboqs":
-            options += ["-DOQS_BUILD_ONLY_LIB=ON", "-DOQS_USE_OPENSSL=OFF",
-                        "-DOQS_DIST_BUILD=ON",
-                        "-DOQS_MINIMAL_BUILD=KEM_ml_kem_768;SIG_ml_dsa_65",
-                        "-DCMAKE_WINDOWS_EXPORT_ALL_SYMBOLS=ON"]
-        else:
-            options += ["-DOPUS_BUILD_TESTING=OFF", "-DOPUS_BUILD_PROGRAMS=OFF"]
+                   f"-DCMAKE_INSTALL_PREFIX={PREFIX}",
+                   "-DOPUS_BUILD_TESTING=OFF", "-DOPUS_BUILD_PROGRAMS=OFF"]
         if sys.platform == "darwin":
             options += ["-DCMAKE_OSX_ARCHITECTURES=arm64", "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"]
         elif sys.platform == "win32":
@@ -76,7 +69,6 @@ def main():
     env = os.environ.copy()
     env["HPQV_NATIVE_PREFIX"] = str(PREFIX)
     # Analysis imports wrappers in subprocesses, so give those native dependencies too.
-    env["OQS_INSTALL_PATH"] = str(PREFIX)
     env["PATH"] = str(PREFIX / "bin") + os.pathsep + env.get("PATH", "")
     if is_mac:
         env["DYLD_FALLBACK_LIBRARY_PATH"] = str(PREFIX / "lib")
@@ -123,7 +115,7 @@ def main():
         ) as response:
             (licenses / "Python-LICENSE.txt").write_bytes(response.read())
     versions = {name: importlib.metadata.version(name) for name in
-                ("cryptography", "liboqs-python", "numpy", "opuslib", "sounddevice", "pyinstaller")}
+                ("cryptography", "pyopenssl", "numpy", "opuslib", "sounddevice", "pyinstaller")}
     (stage / "BUILD-INFO.json").write_text(json.dumps({
         "platform": target, "python": sys.version, "packages": versions,
         "native_sources": SOURCES,

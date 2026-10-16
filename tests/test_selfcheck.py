@@ -15,3 +15,18 @@ import selfcheck  # noqa: E402
 @pytest.mark.parametrize("name", sorted(set(selfcheck.CHECKS) - {"opus"}))
 def test_selfcheck_passes_unfrozen(name):
     assert selfcheck.CHECKS[name]()
+
+
+def test_secure_check_is_registered_and_fails_on_unmirrored_keys(monkeypatch):
+    """The v2 check must actually be able to fail: break the key mirroring and expect an error."""
+    from hpqv import secure
+    assert "secure" in selfcheck.CHECKS
+    real = secure.SecureChannel.media_keys
+
+    def swapped(self):
+        keys = real(self)
+        return secure.MediaKeys(keys.send_secret, keys.send_secret, keys.session_id)
+
+    monkeypatch.setattr(secure.SecureChannel, "media_keys", swapped)
+    with pytest.raises(RuntimeError, match="not mirrored"):
+        selfcheck.secure_session()
