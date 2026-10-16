@@ -7,10 +7,11 @@ degradation and recovery in one continuous call.
 import socket
 import threading
 
-from hpqv import handshake as h
 from hpqv.controls import CallControls
 from hpqv.demo import Stats, _sender_loop
 from hpqv.impair import DelayLine
+
+from v2pair import rings
 
 FRAME = b"\x00\x01" * 960          # one 20 ms frame of PCM
 
@@ -37,12 +38,8 @@ class _Source:
             yield FRAME
 
 
-def _session():
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    hello, kem, kem_pub = h.build_hello(a_pub, a_sec)
-    accept, _ = h.accept_hello(hello, a_pub, b_sec)
-    return h.finish(accept, kem, kem_pub, b_pub)
+def _ring():
+    return rings()[0]
 
 
 def test_loss_control_clamps_to_valid_range():
@@ -76,7 +73,7 @@ def test_sender_honours_a_mid_call_loss_change():
         # First half at 0% loss, second half at 100%: nothing should drop before
         # the flip, and nothing should be sent after it.
         source = _Source(count=100, loss=loss, flip_at=50, flip_to=100)
-        _sender_loop(tx, sink.getsockname(), _session(), source, loss, stats,
+        _sender_loop(tx, sink.getsockname(), _ring(), source, loss, stats,
                      threading.Event())
     finally:
         stop.set()
@@ -92,8 +89,6 @@ def test_sender_encodes_every_frame_and_drops_only_the_datagram(monkeypatch):
     """A network loss happens after encoding: the encoder must still see the
     dropped frame, or the FEC in packet N+1 describes frame N-1, not N."""
     import hpqv.demo as demo
-    from hpqv import packet
-
     encoded = []
 
     class SpyCodec(demo.OpusCodec):
@@ -118,15 +113,15 @@ def test_sender_encodes_every_frame_and_drops_only_the_datagram(monkeypatch):
                 yield FRAME
 
     monkeypatch.setattr(demo, "OpusCodec", SpyCodec)
-    key, send_prefix, recv_prefix = _session()
+    tx_ring, rx_ring = rings()
     loss, stats, sock = CallControls(loss_pct=0.0), Stats(), FakeSock()
-    _sender_loop(sock, ("127.0.0.1", 9), (key, send_prefix, recv_prefix),
+    _sender_loop(sock, ("127.0.0.1", 9), tx_ring,
                  OneLossSource(loss, drop_at=3, count=8), loss, stats,
                  threading.Event())
 
     assert len(encoded) == 8
     assert len(sock.sent) == 7
-    assert [packet.open_(key, send_prefix, dg)[0] for dg in sock.sent] == [0, 1, 2, 4, 5, 6, 7]
+    assert [rx_ring.open_(dg)[0] for dg in sock.sent] == [0, 1, 2, 4, 5, 6, 7]
     sent, _rx, dropped, _rec = stats.snapshot()
     assert (sent, dropped) == (7, 1)
     assert stats.max_datagram == max(map(len, sock.sent))
@@ -161,7 +156,7 @@ def test_sender_applies_fec_and_bitrate_changes_in_sender_thread(monkeypatch):
     monkeypatch.setattr(demo, "OpusCodec", SpyCodec)
     controls = CallControls()
     sender_thread = threading.get_ident()
-    _sender_loop(FakeSock(), ("127.0.0.1", 9), _session(), Source(controls), controls,
+    _sender_loop(FakeSock(), ("127.0.0.1", 9), _ring(), Source(controls), controls,
                  Stats(), threading.Event())
 
     assert [(fec, loss) for fec, loss, _bitrate, _thread_id in observed] == [
@@ -169,3 +164,28 @@ def test_sender_applies_fec_and_bitrate_changes_in_sender_thread(monkeypatch):
     assert observed[2][2] == observed[3][2] == 24000
     assert all(thread_id == sender_thread
                for _fec, _loss, _bitrate, thread_id in observed)
+
+
+def test_sender_stops_cleanly_at_the_last_sequence_number(monkeypatch):
+    """seq is 48 bits: at MAX_SEQ the sender ends the call instead of wrapping or raising."""
+    from hpqv import packet
+
+    monkeypatch.setattr(packet, "MAX_SEQ", 4)
+
+    class FakeSock:
+        def __init__(self):
+            self.sent = []
+
+        def sendto(self, dg, dest):
+            self.sent.append(dg)
+
+    class Source:
+        def frames(self):
+            for _ in range(50):
+                yield FRAME
+
+    tx_ring, rx_ring = rings()
+    sock, stop = FakeSock(), threading.Event()
+    _sender_loop(sock, ("127.0.0.1", 9), tx_ring, Source(), CallControls(), Stats(), stop)
+    assert [rx_ring.open_(dg)[0] for dg in sock.sent] == [0, 1, 2, 3, 4]
+    assert stop.is_set()

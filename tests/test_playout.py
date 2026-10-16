@@ -9,7 +9,7 @@ import threading
 import numpy as np
 import pytest
 
-from hpqv import handshake as h, packet
+from hpqv import packet
 from hpqv.audio import FRAME_SAMPLES, FS, OpusCodec, _encoder_get, _encoder_set
 from hpqv.controls import CallControls
 from hpqv.demo import Stats, _receiver_loop
@@ -17,16 +17,10 @@ from hpqv.eval.fec_recovery import _frames, _segmental_snr_db, _test_signal
 from hpqv import playout as playout_mod
 from hpqv.playout import MAX_GAP, Playout, packet_has_lbrr
 
+from v2pair import rings, sealer_and_ring
+
 N = 40
 _ALWAYS = lambda opus, fec_hint: True
-
-
-def _session():
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    hello, kem, kem_pub = h.build_hello(a_pub, a_sec)
-    accept, _ = h.accept_hello(hello, a_pub, b_sec)
-    return h.finish(accept, kem, kem_pub, b_pub)
 
 
 def _packets(n=N):
@@ -224,8 +218,7 @@ def test_huge_gap_is_not_synthesized():
 
 def _receive(order, depth, packets=None, flags=packet.FLAG_FEC):   # encoder FEC on
     """Send packets `order` (seqs into _packets) over loopback to _receiver_loop."""
-    key, send_prefix, recv_prefix = _session()
-    session = (key, None, send_prefix)       # receiver opens what we seal
+    seal, ring = sealer_and_ring()
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("127.0.0.1", 0))
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -239,13 +232,12 @@ def _receive(order, depth, packets=None, flags=packet.FLAG_FEC):   # encoder FEC
 
     sink, stats, stop = Sink(), Stats(), threading.Event()
     t = threading.Thread(
-        target=_receiver_loop, args=(rx, session, sink, CallControls(jitter_depth=depth), stats, stop))
+        target=_receiver_loop, args=(rx, ring, sink, CallControls(jitter_depth=depth), stats, stop))
     t.start()
     try:
         packets = packets or _packets(max(order) + 1)
         for seq in order:
-            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq], flags=flags),
-                      rx.getsockname())
+            tx.sendto(seal(seq, packets[seq], flags), rx.getsockname())
         for _ in range(100):
             if stats.snapshot()[1] >= len(order):
                 break
@@ -265,8 +257,7 @@ def test_receiver_loop_recovers_a_dropped_datagram():
 
 
 def test_receiver_counts_all_incoming_loss_and_plays_nothing():
-    key, send_prefix, _ = _session()
-    session = (key, None, send_prefix)
+    seal, ring = sealer_and_ring()
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("127.0.0.1", 0))
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -281,11 +272,11 @@ def test_receiver_counts_all_incoming_loss_and_plays_nothing():
     sink, stats, stop = Sink(), Stats(), threading.Event()
     controls = CallControls(incoming_loss_pct=100, jitter_depth=1)
     thread = threading.Thread(target=_receiver_loop,
-                              args=(rx, session, sink, controls, stats, stop))
+                              args=(rx, ring, sink, controls, stats, stop))
     thread.start()
     try:
         for seq, opus in enumerate(_packets(5)):
-            tx.sendto(packet.seal(key, send_prefix, seq, opus), rx.getsockname())
+            tx.sendto(seal(seq, opus), rx.getsockname())
         for _ in range(100):
             if stats.incoming_dropped == 5:
                 break
@@ -300,8 +291,7 @@ def test_receiver_counts_all_incoming_loss_and_plays_nothing():
 
 
 def test_receiver_applies_jitter_depth_change_while_running():
-    key, send_prefix, _ = _session()
-    session = (key, None, send_prefix)
+    seal, ring = sealer_and_ring()
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("127.0.0.1", 0))
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -316,12 +306,12 @@ def test_receiver_applies_jitter_depth_change_while_running():
     sink, stats, stop = Sink(), Stats(), threading.Event()
     controls = CallControls(jitter_depth=50)
     thread = threading.Thread(target=_receiver_loop,
-                              args=(rx, session, sink, controls, stats, stop))
+                              args=(rx, ring, sink, controls, stats, stop))
     thread.start()
     try:
         packets = _packets(4)
         for seq in range(2):
-            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+            tx.sendto(seal(seq, packets[seq]), rx.getsockname())
         for _ in range(100):
             if stats.snapshot()[1] == 2:
                 break
@@ -329,7 +319,7 @@ def test_receiver_applies_jitter_depth_change_while_running():
         assert sink.frames == []
         controls.set(jitter_depth=1)
         for seq in (2, 3):
-            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+            tx.sendto(seal(seq, packets[seq]), rx.getsockname())
         for _ in range(100):
             if len(sink.frames) >= 2:
                 break
@@ -354,8 +344,7 @@ def test_recovered_counts_frames_missing_at_playout_not_lost_datagrams():
 def test_lowering_jitter_depth_drains_the_backlog_while_running():
     """Depth 15 -> 1 with 14 frames buffered: the next packet must flush the
     buffer down to the new depth, not pop one frame and stay 14 frames behind."""
-    key, send_prefix, _ = _session()
-    session = (key, None, send_prefix)
+    seal, ring = sealer_and_ring()
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx.bind(("127.0.0.1", 0))
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -370,13 +359,13 @@ def test_lowering_jitter_depth_drains_the_backlog_while_running():
     sink, stats, stop = Sink(), Stats(), threading.Event()
     controls = CallControls(jitter_depth=15)
     thread = threading.Thread(target=_receiver_loop,
-                              args=(rx, session, sink, controls, stats, stop))
+                              args=(rx, ring, sink, controls, stats, stop))
     thread.start()
     packets = _packets(17)
 
     def send_and_wait(seqs, frames):
         for seq in seqs:
-            tx.sendto(packet.seal(key, send_prefix, seq, packets[seq]), rx.getsockname())
+            tx.sendto(seal(seq, packets[seq]), rx.getsockname())
         for _ in range(100):
             if stats.received == seqs[-1] + 1 and len(sink.frames) >= frames:
                 break
@@ -458,7 +447,6 @@ def test_receiver_fallback_uses_the_fec_flag(monkeypatch, flags, counts):
 
 def test_sender_sets_flag_bit_1_while_encoder_fec_is_on():
     import hpqv.demo as demo
-    from hpqv.keyring import Keyring
 
     class FakeSock:
         def __init__(self):
@@ -477,19 +465,17 @@ def test_sender_sets_flag_bit_1_while_encoder_fec_is_on():
                     self.controls.set(fec=False)
                 yield b"\x00\x01" * FRAME_SAMPLES
 
-    key, send_prefix, recv_prefix = _session()
-    ring = Keyring((key, send_prefix, recv_prefix))
-    ring.rotate_next()                            # generation 1: parity bit must survive
-    send_key, send_prefix2, _ = ring._cur
+    tx_ring, rx_ring = rings()
+    tx_ring.rotate_next()                         # generation 1: parity bit must survive
+    rx_ring.rotate_to(1)
     controls, sock = CallControls(), FakeSock()
-    demo._sender_loop(sock, ("127.0.0.1", 9), ring, Source(controls), controls,
+    demo._sender_loop(sock, ("127.0.0.1", 9), tx_ring, Source(controls), controls,
                       Stats(), threading.Event())
-    flags = [packet.open_(send_key, send_prefix2, dg)[1] for dg in sock.sent]
+    flags = [rx_ring.open_(dg)[1] for dg in sock.sent]
     assert flags == [5, 5, 1, 1]                 # bit 2 = FEC hint, bits 0-1 = generation tag
 
 
 def test_extra_flags_cannot_touch_the_generation_tag_bits():
-    from hpqv.keyring import Keyring
-    key, send_prefix, recv_prefix = _session()
-    dg = Keyring((key, send_prefix, recv_prefix)).seal(0, b"x", extra_flags=0x07)
-    assert packet.open_(key, send_prefix, dg)[1] == 0x04      # generation 0, FEC bit only
+    tx_ring, rx_ring = rings()
+    dg = tx_ring.seal(0, b"x", extra_flags=0x07)
+    assert rx_ring.open_(dg)[1] == 0x04      # generation 0, FEC bit only

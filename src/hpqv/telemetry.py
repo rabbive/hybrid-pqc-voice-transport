@@ -14,14 +14,19 @@ import os
 
 from hpqv.controls import DEFAULTS
 from hpqv.eval.mos import mos_from_network
-from hpqv.packet import MAX_DATAGRAM
+from hpqv.packet import MAX_DATAGRAM, REJECT_REASONS
 
 JITTER_FRAME_MS = 20     # one jitter-buffer slot = one 20 ms Opus frame
 
 _COUNTERS = ["sent", "received", "dropped", "recovered", "concealed", "late",
              "incoming_dropped", "skipped", "rx_expected", "max_datagram", "key_gen"]
 _DELTAS = _COUNTERS + ["rx_transit_sum_ms", "rx_transit_n"]
-COLUMNS = (["t_s", "dt_s"] + _COUNTERS +
+# Cumulative datagrams refused before authentication succeeded, per reason.
+REJECT_COLUMNS = [f"rejects_{r}" for r in REJECT_REASONS]
+# What an export may say about the session. Nothing derived from key material or
+# the TLS exporter is written to disk or the CSV, and that includes the SAS and the
+# peer fingerprint: they exist for the screen, where the two people compare them.
+COLUMNS = (["t_s", "dt_s"] + _COUNTERS + REJECT_COLUMNS +
            ["interval_expected", "interval_delivered", "interval_lost",
             "interval_recovered", "interval_residual", "interval_loss_pct",
             "residual_loss_pct", "recovered_per_s", "rx_jitter_ms", "added_delay_ms",
@@ -74,6 +79,7 @@ class Telemetry:
         delay = JITTER_FRAME_MS * knobs["jitter_depth"] + self._added_delay
         row = {"t_s": t, "dt_s": dt}
         row.update({k: cur[k] for k in _COUNTERS})
+        row.update({f"rejects_{r}": cur["rejects"][r] for r in REJECT_REASONS})
         row.update(
             interval_expected=expected, interval_delivered=delivered,
             interval_lost=lost, interval_recovered=d["recovered"],
@@ -169,8 +175,11 @@ class Telemetry:
              f"dropped by sender {s['dropped']}; largest datagram {s['max_datagram']} B "
              f"(cap {MAX_DATAGRAM} B)",
              f"- Key generation: {s['key_gen']}",
+             "- Datagrams rejected before they counted as received: "
+             + ", ".join(f"{r} {s['rejects'][r]}" for r in REJECT_REASONS),
              f"- Handshake: {s['handshake_ms']:.1f} ms, {s['handshake_bytes']} B "
-             "(HELLO + ACCEPT payloads, over TCP)", "",
+             "(TLS 1.3 handshake and READY, all bytes over TCP both ways)",
+             f"- Negotiated: {s['group'] or 'n/a'}, {s['cipher'] or 'n/a'}", "",
              "## Segments", "",
              "A segment is a run of samples with identical local knob settings "
              "(non-default shown). Each sample covers the interval since the previous "

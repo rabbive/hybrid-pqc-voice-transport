@@ -5,8 +5,10 @@ import pytest
 
 from hpqv.controls import CallControls, DEFAULTS
 from hpqv.gui_logic import (NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
-                            handshake_rows, preset_values, rotate_button_state,
-                            snapshot_for_export, stat_tiles, validate_wav)
+                            format_sas, handshake_rows, preset_values, rotate_button_state,
+                            security_rows, snapshot_for_export, stat_tiles, validate_wav,
+                            wrap_fingerprint)
+from hpqv.demo import Stats, handshake_info
 
 SPEC = {s.knob: s for s in SLIDERS}
 
@@ -76,13 +78,16 @@ def test_bitrate_slider_has_an_auto_stop():
 
 def test_stat_tiles_without_a_telemetry_row():
     tiles = dict(stat_tiles({"sent": 5, "received": 4, "dropped": 1, "incoming_dropped": 0,
-                             "late": 2, "recovered": 3, "concealed": 1}, None))
+                             "late": 2, "recovered": 3, "concealed": 1,
+                             "rejects": {"replay": 2, "auth": 1}}, None))
     assert tiles["Sent"] == "5" and tiles["Recovered (FEC)"] == "3"
+    assert tiles["Rejected (forged/stray)"] == "3"
     assert tiles["Loss you hear"] == tiles["Residual loss"] == tiles["MOS (audio you hear)"] == "—"
 
 
 def test_stat_tiles_with_a_row():
-    stats = dict(sent=0, received=0, dropped=0, incoming_dropped=0, late=0, recovered=0, concealed=0)
+    stats = dict(sent=0, received=0, dropped=0, incoming_dropped=0, late=0, recovered=0, concealed=0,
+                 rejects={})
     row = {"interval_loss_pct": 12.34, "residual_loss_pct": 3.0, "mos": 3.456}
     tiles = dict(stat_tiles(stats, row))
     assert tiles["Loss you hear"] == "12.3 %"
@@ -90,23 +95,58 @@ def test_stat_tiles_with_a_row():
     assert tiles["MOS (audio you hear)"] == "3.46"
 
 
-INFO = {"kem": "ML-KEM-768", "sig": "ML-DSA-65", "hello_bytes": 3000, "accept_bytes": 3400,
-        "total_bytes": 6400, "transport": "TCP", "udp_fragments": 0, "datagram_cap": 1200}
+INFO = handshake_info()
+FP = " ".join(f"{i:04x}" for i in range(16))
 
 
-def test_handshake_rows():
-    rows = dict(handshake_rows(INFO, {"handshake_ms": 12.34, "max_datagram": 173}))
-    assert rows["Key exchange"] == "ML-KEM-768" and rows["Signature"] == "ML-DSA-65"
-    assert rows["HELLO / ACCEPT / total"] == "3000 / 3400 / 6400 B"
-    assert rows["Transport"] == "TCP" and rows["UDP fragments"] == "0 (by design: handshake is on TCP)"
+def _stats(**kw):
+    s = Stats().as_dict()
+    s.update(kw)
+    return s
+
+
+def test_handshake_rows_show_the_v2_suite_before_a_call():
+    rows = dict(handshake_rows(INFO, _stats()))
+    assert rows["Protocol"] == "TLSv1.3" and rows["Key exchange"] == "X25519MLKEM768"
+    assert rows["Signature"] == "ML-DSA-65" and rows["Transport"] == "TCP"
+    assert rows["UDP fragments"] == "0 (by design: handshake is on TCP)"
+    assert rows["Negotiated"] == rows["Handshake time"] == rows["Handshake size"] == "—"
+    assert rows["Largest datagram"] == "—"
+    assert not any("HELLO" in k or "ML-KEM-768" in v for k, v in rows.items())   # v1 rows are gone
+
+
+def test_handshake_rows_after_a_call():
+    rows = dict(handshake_rows(INFO, _stats(
+        handshake_ms=12.34, max_datagram=173, handshake_bytes=20679,
+        group="X25519MLKEM768", cipher="TLS_AES_256_GCM_SHA384")))
     assert rows["Handshake time"] == "12.3 ms"
+    assert rows["Handshake size"].startswith("20679 B")
+    assert rows["Negotiated"] == "X25519MLKEM768 / TLS_AES_256_GCM_SHA384"
     assert rows["Largest datagram"] == "173 B  (cap 1200 B)"
 
 
-def test_handshake_rows_before_a_call_and_without_oqs():
-    rows = dict(handshake_rows(None, {"handshake_ms": 0.0, "max_datagram": 0}))
-    assert rows["Handshake time"] == "—" and rows["Largest datagram"] == "—"
-    assert rows["Key exchange"] == "unavailable"
+def test_security_rows_before_and_after_the_call_starts():
+    idle = dict(security_rows(INFO, _stats(), False, 0))
+    assert set(idle.values()) == {"—"}
+    live = dict(security_rows(INFO, _stats(sas="3f9a01bc", group="X25519MLKEM768",
+                                           peer_fingerprint=FP), True, 2))
+    assert live["Protocol"] == "TLSv1.3" and live["Key exchange"] == "X25519MLKEM768"
+    assert live["Key generation"] == "2"
+    assert live["Code to read aloud (SAS)"] == "3f9a 01bc"
+    assert live["Peer fingerprint"].replace("\n", " ") == FP
+    assert live["Peer fingerprint"].count("\n") == 3          # 16 groups, 4 to a row
+
+
+def test_security_rows_show_a_fingerprint_not_a_hash_of_the_key_generation():
+    a = dict(security_rows(INFO, _stats(sas="3f9a01bc", peer_fingerprint=FP, group="g"), True, 0))
+    b = dict(security_rows(INFO, _stats(sas="3f9a01bc", peer_fingerprint=FP, group="g"), True, 5))
+    assert a["Code to read aloud (SAS)"] == b["Code to read aloud (SAS)"]   # re-keying keeps it
+    assert a["Peer fingerprint"] == b["Peer fingerprint"]
+
+
+def test_sas_and_fingerprint_formatting():
+    assert format_sas("3f9a01bc") == "3f9a 01bc" and format_sas("") == ""
+    assert wrap_fingerprint("a b c d e", per_line=2) == "a b\nc d\ne"
 
 
 def test_loss_slider_captions_say_whose_audio_is_affected():
@@ -151,6 +191,13 @@ def test_end_text_only_claims_peer_when_the_peer_ended_it():
     assert end_text(hung_up=True, peer_ended=True) == "hung up"
     assert end_text(hung_up=False, peer_ended=True) == "call ended by peer"
     assert end_text(hung_up=False, peer_ended=False) == "call ended"
+
+
+def test_end_text_tells_a_lost_connection_from_a_hang_up_and_a_protocol_error():
+    assert end_text(False, False, connection_lost=True) == "connection lost"
+    assert "by peer" not in end_text(False, False, connection_lost=True)
+    assert "protocol" in end_text(False, False, protocol_error=True)
+    assert end_text(True, False, connection_lost=True) == "hung up"
 
 
 # ---------------- rotate button (I8) ----------------
