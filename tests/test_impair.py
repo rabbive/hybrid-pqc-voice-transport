@@ -1,7 +1,7 @@
 import threading
 import time
 
-from hpqv.impair import DelayLine, LossModel
+from hpqv.impair import DelayLine, DupModel, LossModel, TokenBucket
 
 
 def _loss_stats(loss_model, loss_pct, model, burst_len=4, count=20_000):
@@ -116,3 +116,27 @@ def test_delay_line_propagates_delivery_errors_from_its_thread():
         assert str(error) == "send failed"
     else:
         raise AssertionError("close must report a failed send")
+
+
+def test_dup_model_rate_extremes_and_seed():
+    model = DupModel(seed=3)
+    rate = sum(model.duplicate(12) for _ in range(20_000)) / 20_000
+    assert abs(rate - 0.12) < 0.01
+    assert not any(model.duplicate(0) for _ in range(100))
+    assert all(model.duplicate(100) for _ in range(100))
+    a, b = DupModel(seed=9), DupModel(seed=9)
+    assert [a.duplicate(30) for _ in range(200)] == [b.duplicate(30) for _ in range(200)]
+
+
+def test_token_bucket_burst_then_shapes_at_rate_and_refills_capped():
+    now = [0.0]
+    bucket = TokenBucket(1000, 500, clock=lambda: now[0])
+    assert bucket.reserve(500) == 0
+    assert bucket.reserve(500) == 0.5
+    assert bucket.reserve(500) == 1.0
+    now[0] = 10.0
+    assert bucket.reserve(500) == 0
+    assert bucket.reserve(500) == 0.5
+    now[0] = 1000.0
+    assert bucket.reserve(500) == 0
+    assert bucket.reserve(500) == 0.5

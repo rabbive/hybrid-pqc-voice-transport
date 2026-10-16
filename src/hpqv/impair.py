@@ -110,3 +110,37 @@ class DelayLine:
             self._thread.join()
         if self._error is not None:
             raise self._error
+
+
+class DupModel:
+    def __init__(self, seed=None):
+        self._rng = random.Random(seed)
+
+    def duplicate(self, dup_pct):
+        if dup_pct <= 0:
+            return False
+        if dup_pct >= 100:
+            return True
+        return self._rng.random() < dup_pct / 100
+
+
+class TokenBucket:
+    """Shaper: reserve() returns how long a packet must wait to stay at the rate."""
+
+    def __init__(self, rate_bytes_per_s, burst_bytes, clock=time.monotonic):
+        if rate_bytes_per_s <= 0 or burst_bytes <= 0:
+            raise ValueError("rate and burst must be positive")
+        self._rate = rate_bytes_per_s
+        self._burst = burst_bytes
+        self._clock = clock
+        self._tokens = float(burst_bytes)
+        self._last = clock()
+        self._lock = threading.Lock()
+
+    def reserve(self, nbytes):
+        with self._lock:
+            now = self._clock()
+            self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
+            self._last = now
+            self._tokens -= nbytes
+            return max(0.0, -self._tokens / self._rate)
