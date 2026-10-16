@@ -1,5 +1,51 @@
 # Wire Format
 
+This file has two parts: **v2** (current, Phase B) first, then **v1** (historical).
+The full v2 design is in `docs/PROTOCOL-v2.md`.
+
+## v2
+
+### Control channel (TCP)
+TLS 1.3 (X25519MLKEM768, mutual ML-DSA-65 pinned certificates, ALPN `hpqv/2`).
+After the handshake, each control frame is TLS application data:
+`msg_type(1B) ‖ length(u16, BE) ‖ payload`, with `length <= 1024`.
+- MSG_CALL_START = 1 — payload: caller's UDP port (u16, BE).
+- MSG_CALL_END = 2 — empty payload.
+- MSG_KEY_ROTATE = 3 — payload: new key generation (u32, BE).
+- MSG_READY = 4 — empty; the server sends it after accepting the client
+  certificate. The client sends nothing else until it has received it.
+
+### Media keys
+TLS exporter, empty context: `EXPORTER-hpqv2 media c2s` and `media s2c` (32 B
+each), `EXPORTER-hpqv2 session id` (4 B), `EXPORTER-hpqv2 sas` (4 B). The client
+sends with c2s and receives with s2c; the server is the reverse.
+Per direction: key(32) = HKDF-Expand-SHA256(secret, `hpqv2 media key`),
+iv(12) = HKDF-Expand-SHA256(secret, `hpqv2 media iv`). Rotation:
+secret' = HKDF-Expand-SHA256(secret, `hpqv2 media upd`, 32).
+
+### Voice datagram (UDP, 29 to 1200 B)
+All integers big-endian. The 12-byte header is the AEAD AAD.
+
+| Offset | Size | Field |
+|---|---|---|
+| 0 | 1 | ver_type = 0x21 (version 2 in the high nibble, type 1 = voice) |
+| 1 | 1 | flags: bits 0-1 key generation mod 4, bit 2 FEC hint (0x04), bits 3-7 must be 0 |
+| 2 | 4 | session_id (exporter) |
+| 6 | 6 | seq, uint48, never reused or wrapped |
+| 12 | n+16 | ChaCha20-Poly1305 ciphertext and tag |
+
+nonce = iv XOR (0^6 ‖ seq). Receiver order: size, ver_type and reserved bits,
+session_id, generation key, replay check (256-packet window), AEAD, then the
+replay window update. Rotation rules and the 4 s key retention are as in
+ADR-0004. The FEC hint semantics are as described under v1 below.
+
+---
+
+# v1 (historical, experiment/cain and release v0.1.0-demo.1)
+
+The content below describes the v1 protocol. It is not used by v2 and does not
+interop with it.
+
 ## Handshake (over TCP, length-prefixed records)
 KEM: ML-KEM-768
 Sig: ML-DSA-65
