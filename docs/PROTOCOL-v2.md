@@ -501,14 +501,21 @@ other's fingerprint as a friend; a call then connected with the code `15944f99`,
 group X25519MLKEM768, and ended with `sent=150 received=150 dropped=0`. The
 transcript is in the GATE 1 report, not committed.
 
-**Known test instability on this machine, not fixed in this task.** In five full
+**Known test instability on this machine.** In five full
 runs on this branch, `tests/test_pairing.py::test_listener_pairs_through_window_and_survives_stray_connections`
 failed in three (`ConnectionResetError` from `connect()` during its burst of 100
 stray connections; the listener's backlog is 8). A fourth run had one failure that
 was not identified, and the fifth, the run quoted above, had none. Run alone, it failed
 2 times out of 2. In one of the runs `tests/eval/test_full_handshake.py` also failed
-on a timing bound (`median_ms < 45`, observed 45.37). The cause of the
-`ConnectionResetError` has not been established.
+on a timing bound (`median_ms < 45`, observed 45.37).
+
+*Update (fix 83f7efe):* the `ConnectionResetError` was the kernel resetting
+connections that overflowed the listener's 8-entry accept backlog. Run alone, the
+test failed 10/10 with backlog 8 and 0/10 with 128. The listener now uses
+`socket.SOMAXCONN`, and the test's stray connects tolerate a reset. Under extreme
+machine load (load average about 90, several agents running) the real pairing
+connect could still be reset in about 1 run in 10. The timing-bound flake in
+`test_full_handshake.py` is load-related and unchanged.
 
 ### Assumptions
 
