@@ -60,7 +60,9 @@ def make_window(clock=None):
     win.telemetry = None
     win.events = queue.Queue()
     win.worker = None
-    win._live = win._hung_up = win._closing = False
+    win._live = win._hung_up = win._closing = win._ringing = False
+    win._dialog = None
+    win._answers = queue.Queue()
     win._last_sample = 0.0
     win._export_thread = None
     for name in ("state_label", "start_btn", "stop_btn", "export_btn", "export_label", "conn",
@@ -375,3 +377,92 @@ def test_identity_section_has_three_pickers_and_create_button(monkeypatch):
     assert "Create identity" in buttons and buttons.count("…") >= 4     # 3 identity + 1 WAV
     note = next(t for t in labels if "Never share the .key" in t)
     assert ".crt" in note
+
+
+# ---------------- worker: the listener asks before answering (real TLS) ----------------
+
+def _listen_real_tls(win, monkeypatch, act):
+    """Run the listener worker against a real caller-side TLS channel. `act(cfg, ch)`
+    plays the user once the prompt event has been raised; returns (events, ch)."""
+    import socket
+    import struct
+    from hpqv import control, demo, identity, secure
+    caller, listener = identity.new("caller"), identity.new("listener")
+    monkeypatch.setattr(demo, "_load_identity", lambda *a: (listener, caller.cert_pem))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    cfg = {"mode": "listen", "port": port, "target": "", "key": "k", "cert": "c",
+           "peer_cert": "p", "input": "mic", "wav": None, "record_wav": None,
+           "stop": win.stop_event, "stats": demo.Stats(), "handle": win.call_handle,
+           "answers": queue.Queue()}
+    win.controls = MagicMock(get=lambda k: 0)
+    t = threading.Thread(target=win._run, args=(cfg,))
+    t.start()
+    for _ in range(50):
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            break
+        except OSError:
+            time.sleep(0.05)
+    ch = secure.SecureChannel.establish(sock, "client", caller, listener.cert_pem)
+    ch.send(control.MSG_CALL_START, struct.pack(">H", 5555))
+    events = []
+    deadline = time.monotonic() + 5
+    while not any(k == "incoming" for k, _ in events) and time.monotonic() < deadline:
+        try:
+            events.append(win.events.get(timeout=0.1))
+        except queue.Empty:
+            pass
+    try:
+        act(cfg, ch)
+        t.join(5)
+        assert not t.is_alive()
+    finally:
+        ch.close()
+    while not win.events.empty():
+        events.append(win.events.get_nowait())
+    return events, cfg
+
+
+def test_listener_prompt_carries_the_peers_fingerprint_and_sas_and_decline_ends_the_call(
+        monkeypatch):
+    from hpqv import control
+    got = {}
+
+    def decline(cfg, ch):
+        cfg["answers"].put(False)
+        got["msg"] = ch.recv(timeout=3)
+
+    events, cfg = _listen_real_tls(make_window(), monkeypatch, decline)
+    incoming = next(v for k, v in events if k == "incoming")
+    assert incoming == {"fingerprint": cfg["stats"].peer_fingerprint, "sas": cfg["stats"].sas}
+    assert len(incoming["sas"]) == 8 and len(incoming["fingerprint"].split()) == 16
+    assert got["msg"] == (control.MSG_CALL_END, b"")
+    assert ("state", "declined") in events and events[-1] == ("done", None)
+
+
+def test_listener_hang_up_while_ringing_says_hung_up(monkeypatch):
+    win = make_window()
+    events, _ = _listen_real_tls(win, monkeypatch, lambda cfg, ch: win.stop_event.set())
+    assert ("state", "hung up") in events and events[-1] == ("done", None)
+
+
+def test_listener_accept_drains_stale_audio_then_starts_the_call(monkeypatch):
+    import socket
+    from hpqv import demo
+    calls, drained = [], []
+    real_drain = demo.drain_udp
+    monkeypatch.setattr(demo, "drain_udp", lambda s: drained.append(real_drain(s)))
+    monkeypatch.setattr(demo, "_run_call", lambda ch, udp, dest, args, **kw: calls.append(dest))
+
+    def accept(cfg, ch):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
+            tx.sendto(b"\x21" * 40, ("127.0.0.1", cfg["port"]))     # audio sent while ringing
+        time.sleep(0.1)
+        cfg["answers"].put(True)
+
+    events, _ = _listen_real_tls(make_window(), monkeypatch, accept)
+    assert calls == [("127.0.0.1", 5555)]
+    assert drained == [1]
+    assert ("state", "connected — talk") in events

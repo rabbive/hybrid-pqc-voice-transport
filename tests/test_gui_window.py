@@ -170,3 +170,36 @@ def test_security_tab_has_a_wire_panel_that_starts_empty(root):
     win._refresh()
     assert win.wire.values["Sequence"].cget("text") == "42"
     assert win.wire.values["Version/type"].cget("text").startswith("0x21")
+
+
+def test_stale_answer_does_not_leak_into_next_call(root, monkeypatch):
+    win = DemoWindow(root)
+    cfgs = []
+    monkeypatch.setattr(win.conn, "read", lambda: {
+        "mode": "listen", "port": 0, "target": "", "key": "k", "cert": "c", "peer_cert": "p",
+        "input": "mic", "wav": None, "record_wav": None})
+    monkeypatch.setattr(win, "_run", lambda cfg: cfgs.append(cfg))
+    win._start()
+    win.worker.join(1)
+    first = win._answers
+    first.put(True)                   # a late Accept for call 1
+    win._start()
+    win.worker.join(1)
+    assert win._answers is not first and win._answers.empty()
+    assert cfgs[1]["answers"] is win._answers
+
+
+def test_incoming_event_opens_a_dialog_and_done_closes_it(root):
+    win = DemoWindow(root)
+    win._answers = __import__("queue").Queue()
+    win.events.put(("incoming", {"fingerprint": " ".join(["abcd"] * 16), "sas": "c0ffee42"}))
+    win._drain()
+    assert win._dialog is not None and win._dialog.top.winfo_exists()
+    win._dialog.answer(True)
+    assert win._answers.get_nowait() is True and win._dialog is None
+    win.events.put(("incoming", {"fingerprint": " ".join(["abcd"] * 16), "sas": "c0ffee42"}))
+    win._drain()
+    top = win._dialog.top
+    win.events.put(("done", None))
+    win._drain()
+    assert win._dialog is None and not top.winfo_exists()

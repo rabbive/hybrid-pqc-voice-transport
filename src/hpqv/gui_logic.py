@@ -4,6 +4,8 @@ Kept apart from the widgets so they are unit-testable and so there is one
 definition of every range and label shared by the sliders and the tests.
 """
 import copy
+import queue
+import time
 import wave
 from dataclasses import dataclass
 from typing import Callable
@@ -177,6 +179,31 @@ def security_rows(info: dict, stats: dict, live: bool, generation: int) -> list:
 
 
 # ---------------- call lifecycle ----------------
+
+def incoming_call_text(fingerprint: str, sas: str) -> str:
+    """Body of the incoming-call prompt: who is calling (their certificate's
+    fingerprint) and the code both sides must read aloud before answering."""
+    return ("Incoming call. The caller's certificate fingerprint is:\n\n"
+            f"{wrap_fingerprint(fingerprint)}\n\n"
+            f"Read this code aloud; the caller must see the same one:\n{format_sas(sas)}\n\n"
+            "Answer only if both match.")
+
+
+def wait_for_answer(answers, stop, timeout: float, tick: float = 0.2) -> bool:
+    """Worker side of the prompt: True only if Accept (True) arrives before `timeout`
+    and Hang up (`stop`) was not pressed. Decline, timeout and Hang up are all False."""
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            answer = answers.get(timeout=min(tick, remaining))
+        except queue.Empty:
+            continue
+        return bool(answer) and not stop.is_set()
+    return False
+
 
 def validate_wav(path) -> "str | None":
     """Why `path` cannot be a call input, or None. Mirrors demo.FrameSource's checks."""

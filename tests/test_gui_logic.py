@@ -1,12 +1,15 @@
 """Pure GUI logic: presets, slider mapping, stats text. No Tk needed."""
+import queue
+import threading
+import time
 import wave
 
 import pytest
 
 from hpqv.controls import CallControls, DEFAULTS
 from hpqv.gui_logic import (NONE, NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
-                            format_sas, handshake_rows, preset_values, rotate_button_state,
-                            security_rows, snapshot_for_export, stat_tiles, validate_wav,
+                            format_sas, handshake_rows, incoming_call_text, preset_values, rotate_button_state,
+                            security_rows, snapshot_for_export, stat_tiles, validate_wav, wait_for_answer,
                             wire_rows, wrap_fingerprint)
 from hpqv import packet
 from hpqv.demo import Stats, handshake_info
@@ -273,3 +276,30 @@ def test_wire_rows_for_a_malformed_datagram():
     rows = dict(wire_rows(b"\x00" * 40))
     assert rows["Version/type"] == "not a v2 datagram"
     assert rows["Sequence"] == NONE
+
+
+def test_incoming_call_text_shows_wrapped_fingerprint_and_sas():
+    fp = " ".join(["abcd"] * 16)
+    text = incoming_call_text(fp, "c0ffee42")
+    assert wrap_fingerprint(fp) in text and "c0ff ee42" in text
+
+
+def test_wait_for_answer_accept_decline_timeout():
+    q = queue.Queue()
+    q.put(True)
+    assert wait_for_answer(q, threading.Event(), 1.0) is True
+    q.put(False)
+    assert wait_for_answer(q, threading.Event(), 1.0) is False
+    t0 = time.monotonic()
+    assert wait_for_answer(queue.Queue(), threading.Event(), 0.3) is False
+    assert 0.25 <= time.monotonic() - t0 < 1.0
+
+
+def test_wait_for_answer_returns_false_when_stopped():
+    stop = threading.Event()
+    stop.set()
+    q = queue.Queue()
+    q.put(True)                       # Hang up wins even over a queued Accept
+    t0 = time.monotonic()
+    assert wait_for_answer(q, stop, 30.0) is False
+    assert time.monotonic() - t0 < 0.5

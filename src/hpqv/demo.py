@@ -21,6 +21,7 @@ STATUS_INTERVAL = 1.0
 FRAME_MS = 1000 * FRAME_SAMPLES // FS     # 20
 CALL_START_TIMEOUT = 10.0                 # the listener waits this long for CALL_START
 CONNECT_TIMEOUT = 10.0
+ANSWER_TIMEOUT = 30.0                     # an unanswered incoming call is declined after this
 
 
 class CallSetupError(Exception):
@@ -607,6 +608,25 @@ def wait_call_start(channel, peer_ip, timeout=CALL_START_TIMEOUT, stop_event=Non
         return peer_ip, port
 
 
+def drain_udp(sock, limit=4096) -> int:
+    """Discard datagrams already queued on `sock` without blocking; at most `limit`,
+    so a flood cannot hold the caller here. Returns how many were discarded."""
+    timeout = sock.gettimeout()
+    sock.setblocking(False)
+    n = 0
+    try:
+        while n < limit:
+            sock.recv(packet.MAX_DATAGRAM + 1)
+            n += 1
+    except (BlockingIOError, InterruptedError):
+        pass
+    except OSError:                  # e.g. Windows WSAECONNRESET: nothing more to drain
+        pass
+    finally:
+        sock.settimeout(timeout)
+    return n
+
+
 def _fail(what, exc):
     sys.exit(f"{what}: {exc}")
 
@@ -720,7 +740,8 @@ def main(argv=None):
     p_keygen.add_argument("--cert-out", required=True, help="certificate file to give the peer")
     p_keygen.set_defaults(func=keygen)
 
-    p_listen = sub.add_parser("listen", help="wait for an incoming call")
+    p_listen = sub.add_parser(
+        "listen", help="wait for an incoming call and answer it (the GUI asks first)")
     p_listen.add_argument("--port", type=int, required=True)
     _add_common_call_args(p_listen, identity_required=True)
     p_listen.set_defaults(func=listen)

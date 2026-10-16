@@ -203,6 +203,40 @@ class WirePanel(_Grid):
         self.show(wire_rows(dg))
 
 
+class IncomingCallDialog:
+    """Accept / Decline prompt for an incoming call, with the caller's fingerprint and
+    the SAS in large type. Not modal: the window keeps polling while it is open.
+    Closing it with the window's X counts as Decline; close() just removes it."""
+
+    def __init__(self, root, text, sas, on_answer):
+        self._on_answer = on_answer
+        self._answered = False
+        self.top = tk.Toplevel(root)
+        self.top.title("Incoming call")
+        self.top.transient(root)
+        self.top.protocol("WM_DELETE_WINDOW", lambda: self.answer(False))
+        ttk.Label(self.top, text=text, style="Mono.TLabel", justify="left").pack(
+            padx=16, pady=(16, 4), anchor="w")
+        ttk.Label(self.top, text=sas, style="Sas.TLabel").pack(pady=8)
+        buttons = ttk.Frame(self.top)
+        buttons.pack(pady=(4, 16))
+        ttk.Button(buttons, text="Accept", command=lambda: self.answer(True)).pack(
+            side="left", padx=8)
+        ttk.Button(buttons, text="Decline", command=lambda: self.answer(False)).pack(
+            side="left", padx=8)
+
+    def answer(self, accepted):
+        if self._answered:
+            return
+        self._answered = True
+        self.close()
+        self._on_answer(accepted)
+
+    def close(self):
+        if self.top.winfo_exists():
+            self.top.destroy()
+
+
 class StatsPanel(_Grid):
     def __init__(self, parent):
         box = ttk.LabelFrame(parent, text="Live stats")

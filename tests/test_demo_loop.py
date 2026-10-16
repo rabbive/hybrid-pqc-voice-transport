@@ -1,5 +1,6 @@
 """FrameSource file mode: one pass by default, restart at EOF with loop=True."""
 import itertools
+import socket
 import threading
 import time
 import wave
@@ -157,3 +158,39 @@ def test_sender_records_the_exact_last_datagram_sent():
                       threading.Event())
     assert len(udp.sent) == 3
     assert stats.last_datagram == udp.sent[-1]
+
+
+def _udp_pair():
+    rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    rx.bind(("127.0.0.1", 0))
+    tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    return rx, tx
+
+
+def _send_and_wait(rx, tx, n):
+    for i in range(n):
+        tx.sendto(bytes([i]) * 40, rx.getsockname())
+    time.sleep(0.1)                   # loopback delivery is fast, not instant
+
+
+def test_drain_udp_discards_queued_datagrams_and_keeps_timeout():
+    rx, tx = _udp_pair()
+    with rx, tx:
+        rx.settimeout(0.5)
+        _send_and_wait(rx, tx, 3)
+        assert demo.drain_udp(rx) == 3
+        assert rx.gettimeout() == 0.5
+        rx.setblocking(False)
+        try:
+            rx.recv(64)
+        except BlockingIOError:
+            pass
+        else:
+            raise AssertionError("socket still had a datagram queued")
+
+
+def test_drain_udp_is_bounded():
+    rx, tx = _udp_pair()
+    with rx, tx:
+        _send_and_wait(rx, tx, 50)
+        assert demo.drain_udp(rx, limit=10) == 10

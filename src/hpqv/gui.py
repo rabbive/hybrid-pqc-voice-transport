@@ -29,10 +29,11 @@ from hpqv import control, demo
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
 from hpqv.gui_graph import GraphCanvas, SERIES
-from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_wav)
+from hpqv.gui_logic import (CallClock, end_text, format_sas, incoming_call_text,
+                            snapshot_for_export, validate_wav, wait_for_answer)
 from hpqv.gui_network import NetworkPanel
-from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
-                             StatsPanel, WirePanel)
+from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, IncomingCallDialog,
+                             SecurityPanel, StatsPanel, WirePanel)
 from hpqv.secure import HandshakeError
 from hpqv.telemetry import Telemetry
 
@@ -65,6 +66,9 @@ class DemoWindow:
         self._cc = CallClock(clock)        # graph time; freezes at hang-up
         self._last_sample = 0.0
         self._export_thread = None
+        self._answers = queue.Queue()      # Accept/Decline for the current call only
+        self._dialog = None                # open IncomingCallDialog, if any
+        self._ringing = False              # caller: connected, no audio from the peer yet
         self._build()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(POLL_MS, self._poll)
@@ -77,6 +81,8 @@ class DemoWindow:
         style.configure("Value.TLabel", font=base.copy().actual() | {"weight": "bold"})
         style.configure("Mono.TLabel", font=tkfont.nametofont("TkFixedFont"))
         style.configure("State.TLabel", font=base.copy().actual() | {"weight": "bold", "size": 14})
+        style.configure("Sas.TLabel", font=tkfont.nametofont("TkFixedFont").actual()
+                        | {"weight": "bold", "size": 28})
 
     # ---------------- layout ----------------
 
@@ -178,7 +184,9 @@ class DemoWindow:
             if err:
                 messagebox.showerror("Cannot start", err)
                 return
-        cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle())
+        cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle(),
+                   answers=queue.Queue())   # fresh per call: a late answer cannot leak
+        self._answers = cfg["answers"]
         self.stop_event, self.stats, self.call_handle = cfg["stop"], cfg["stats"], cfg["handle"]
         self._hung_up = False
         self.start_btn.state(["disabled"])
@@ -191,6 +199,7 @@ class DemoWindow:
         """Hang up through the handle so the peer's call ends too."""
         self._hung_up = True
         self.stop_btn.state(["disabled"])
+        self._close_dialog()
         self.call_handle.hang_up()
         self.stop_event.set()              # also frees a worker still waiting in accept()
         self.state_label.config(text="hanging up…")
@@ -199,6 +208,7 @@ class DemoWindow:
         """Window X: hang up first so the peer gets CALL_END, then tear down."""
         self._closing = True               # _poll must not reschedule on a dead root
         try:
+            self._close_dialog()
             if self.worker and self.worker.is_alive():
                 self._hung_up = True
                 try:
@@ -267,8 +277,18 @@ class DemoWindow:
                 put(("state", f"handshake with {addr[0]}…"))
                 channel = demo.establish_timed("server", conn, ident, peer_cert, stats)
                 udp = demo._open_bound_udp(cfg["port"])
+                put(("incoming", {"fingerprint": stats.peer_fingerprint, "sas": stats.sas}))
+                put(("state", "incoming call: compare the code, then Accept or Decline"))
+                if not wait_for_answer(cfg["answers"], stop, demo.ANSWER_TIMEOUT):
+                    try:
+                        channel.send(control.MSG_CALL_END)
+                    except OSError:
+                        pass
+                    put(("state", "hung up" if stop.is_set() else "declined"))
+                    return
                 put(("state", "waiting for the caller to start the call…"))
                 dest = demo.wait_call_start(channel, addr[0], stop_event=stop)
+                demo.drain_udp(udp)        # the caller's audio while it rang is stale
             else:
                 host, port_s = cfg["target"].rsplit(":", 1)
                 put(("state", f"connecting to {host}…"))
@@ -281,7 +301,8 @@ class DemoWindow:
                 dest = (host, int(port_s))
 
             put(("connected", None))
-            put(("state", "connected — talk"))
+            # The caller cannot tell when the listener presses Accept; first audio means it did.
+            put(("ringing", None) if cfg["mode"] == "call" else ("state", "connected — talk"))
             demo._run_call(channel, udp, dest, args, stats=stats, controls=self.controls,
                            stop_event=stop, call_handle=handle)
             put(("state", self._end_text()))
@@ -296,6 +317,25 @@ class DemoWindow:
                 if s is not None:
                     s.close()
             put(("done", None))
+
+    # ---------------- incoming-call prompt (main thread) ----------------
+
+    def _open_dialog(self, value):
+        self._close_dialog()
+        answers = self._answers
+
+        def on_answer(accepted):
+            self._dialog = None
+            answers.put(accepted)
+
+        self._dialog = IncomingCallDialog(
+            self.root, incoming_call_text(value["fingerprint"], value["sas"]),
+            format_sas(value["sas"]), on_answer)
+
+    def _close_dialog(self):
+        dialog, self._dialog = self._dialog, None
+        if dialog is not None:
+            dialog.close()
 
     # ---------------- export ----------------
 
@@ -337,6 +377,11 @@ class DemoWindow:
                 return
             if kind == "state":
                 self.state_label.config(text=value)
+            elif kind == "incoming":
+                self._open_dialog(value)
+            elif kind == "ringing":
+                self._ringing = True
+                self.state_label.config(text="ringing — waiting for them to answer")
             elif kind == "connected":
                 self._live = True
                 self._cc.start()
@@ -354,6 +399,8 @@ class DemoWindow:
                     if self._live:
                         self._sample()      # close the last partial interval for export
                 finally:                    # never leave Start locked, whatever the sample did
+                    self._close_dialog()
+                    self._ringing = False
                     self._live = False
                     self._cc.freeze()       # keep the finished call on screen
                     self.start_btn.state(["!disabled"])
@@ -367,6 +414,9 @@ class DemoWindow:
             self._sample()
         rows = self.telemetry.rows if self.telemetry else []
         stats = self.stats.as_dict()
+        if self._ringing and stats["received"] > 0:
+            self._ringing = False
+            self.state_label.config(text="connected — talk")
         self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
         self.handshake_panel.update(stats)
         self.security.update(self._live, self.call_handle.key_generation(), stats,
