@@ -52,7 +52,7 @@ def make_window(clock=None):
     win._now = now
     win._cc = CallClock(win._clock)
     win.stats = MagicMock()
-    win.stats.as_dict.return_value = {}
+    win.stats.as_dict.return_value = {"last_datagram": b""}
     win.stats.levels.return_value = (0, 0)
     win.controls = MagicMock()
     win.stop_event = threading.Event()
@@ -64,7 +64,7 @@ def make_window(clock=None):
     win._last_sample = 0.0
     win._export_thread = None
     for name in ("state_label", "start_btn", "stop_btn", "export_btn", "export_label", "conn",
-                 "stats_panel", "handshake_panel", "security", "graph"):
+                 "stats_panel", "handshake_panel", "security", "wire", "graph"):
         setattr(win, name, MagicMock())
     return win
 

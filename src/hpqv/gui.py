@@ -32,7 +32,7 @@ from hpqv.gui_graph import GraphCanvas, SERIES
 from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_wav)
 from hpqv.gui_network import NetworkPanel
 from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
-                             StatsPanel)
+                             StatsPanel, WirePanel)
 from hpqv.secure import HandshakeError
 from hpqv.telemetry import Telemetry
 
@@ -108,6 +108,7 @@ class DemoWindow:
         self.handshake_panel = HandshakePanel(call_tab, self.info)
         self.network = NetworkPanel(net_tab, self.controls)
         self.security = SecurityPanel(sec_tab, self._rotate, self.info)
+        self.wire = WirePanel(sec_tab)
 
         self.stats_panel = StatsPanel(right)
         graph_box = ttk.LabelFrame(right, text="Last 60 s")
@@ -370,6 +371,7 @@ class DemoWindow:
         self.handshake_panel.update(stats)
         self.security.update(self._live, self.call_handle.key_generation(), stats,
                              ready=self._rotation_ready())
+        self.wire.update(stats["last_datagram"])
         if rows or self.telemetry:
             self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
                               self._cc.now())

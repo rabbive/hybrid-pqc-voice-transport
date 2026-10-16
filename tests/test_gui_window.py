@@ -154,3 +154,19 @@ def test_start_validates_the_wav_choice(root, monkeypatch):
     win.conn.source.set("file")
     win._start()
     assert errors and win.worker is None
+
+
+def test_security_tab_has_a_wire_panel_that_starts_empty(root):
+    from hpqv import packet
+    from hpqv.gui_logic import NONE
+    from hpqv.keyring import Keyring
+    from hpqv.secure import MediaKeys
+    win = DemoWindow(root)
+    assert all(lbl.cget("text") == NONE for lbl in win.wire.values.values())
+    ring = Keyring(MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
+                             session_id=b"abcd"))
+    with win.stats.lock:
+        win.stats.last_datagram = ring.seal(42, b"\x00" * 50)
+    win._refresh()
+    assert win.wire.values["Sequence"].cget("text") == "42"
+    assert win.wire.values["Version/type"].cget("text").startswith("0x21")

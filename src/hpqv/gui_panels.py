@@ -6,8 +6,8 @@ the window shell never reaches into a panel's internals.
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from hpqv.gui_logic import (NONE, SAS_HINT, handshake_rows, rotate_button_state,
-                            security_rows, stat_tiles, wrap_fingerprint)
+from hpqv.gui_logic import (NONE, SAS_HINT, WIRE_LABELS, handshake_rows, rotate_button_state,
+                            security_rows, stat_tiles, wire_rows, wrap_fingerprint)
 
 
 class ConnectionPanel:
@@ -184,6 +184,23 @@ class SecurityPanel:
         self.button.state(["!disabled"] if enabled else ["disabled"])
         for label, value in security_rows(self.info, stats, live, generation):
             self.values[label].config(text=value)
+
+
+class WirePanel(_Grid):
+    """The last datagram this peer sent, as anyone on the network sees it."""
+
+    def __init__(self, parent):
+        box = ttk.LabelFrame(parent, text="What an eavesdropper sees (your last packet)")
+        box.pack(fill="x", padx=6, pady=4)
+        super().__init__(box, WIRE_LABELS)
+        self.values["Payload bytes (first 32)"].config(style="Mono.TLabel", justify="left")
+        ttk.Label(box, text="This is everything the network carries. The voice is inside the "
+                  "encrypted payload; without the session keys it cannot be decoded. "
+                  "Wireshark shows the same bytes.", wraplength=480).grid(
+            row=len(WIRE_LABELS), column=0, columnspan=2, sticky="w", padx=6, pady=4)
+
+    def update(self, dg):
+        self.show(wire_rows(dg))
 
 
 class StatsPanel(_Grid):
