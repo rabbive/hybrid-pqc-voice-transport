@@ -38,7 +38,7 @@ the `feat/secure-session-v2` build or later; v2 does not talk to the v1 release.
 | 5 | A: Security tab, *What an eavesdropper sees*. Match its sequence number and first payload bytes to the latest `hpqv` packet. | "This is everything on the wire. Without the session keys, the voice inside cannot be decoded." | — |
 | 6 | Press **Rotate keys**. | "New keys mid-call: the generation in the header goes from 0 to 1, and the audio does not stop." | Button says *old key retiring…*: wait 4 s and press again. |
 | 7 | Network tab: Bad Wi-Fi preset, then repair modes (section 2's 3:00–10:00). | "The Review II loss demo, now on the v2 protocol." | — |
-| 8 | Slide from [RELATED-WORK.md](RELATED-WORK.md). | "Of the four projects we compared, only ours reports measurements of how the post-quantum handshake behaves under loss." | — |
+| 8 | Slide from [RELATED-WORK.md](RELATED-WORK.md). | "Of the four projects we compared, only ours reports measurements of how a post-quantum handshake behaves under loss. Those numbers are from our v1 protocol; v2 has not been re-measured yet." | — |
 
 Hang up on either laptop ends both. The handshake-failure wording is `demo.FAILURE_TEXT`.
 

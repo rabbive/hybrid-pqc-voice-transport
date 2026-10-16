@@ -13,7 +13,7 @@ is all rights reserved).
 | Replay protection on media | 256-packet sliding window | not stated | not stated | not stated |
 | Audio | full duplex | full duplex (WebRTC) | full duplex | one-way |
 | Large handshake vs MTU | handshake on TCP; every voice datagram ≤ 1200 B | not discussed | not discussed | not discussed |
-| Measured evaluation | `tc netem` loss sweeps, IP fragment counts, handshake completion under loss, E-model MOS, FEC SNR ([report](EVALUATION-REPORT.md)) | not stated | performance claims (<1 ms crypto, <100 ms LAN) with no method given | live latency/jitter/loss display |
+| Measured evaluation | `tc netem` loss sweeps, IP fragment counts, handshake completion under loss, E-model MOS, FEC SNR, all measured on the **v1** protocol ([report](EVALUATION-REPORT.md)); v2 not yet re-measured | not stated | performance claims (<1 ms crypto, <100 ms LAN) with no method given | live latency/jitter/loss display |
 
 ## What we took from them
 
@@ -28,5 +28,6 @@ is all rights reserved).
 
 ## One line for the slide
 
-Of the four projects compared, only hpqv reports measurements of how its
-post-quantum handshake behaves under packet loss.
+Of the four projects compared, only hpqv reports measurements of how a
+post-quantum handshake behaves under packet loss (measured on our v1 protocol;
+v2 not yet re-measured).

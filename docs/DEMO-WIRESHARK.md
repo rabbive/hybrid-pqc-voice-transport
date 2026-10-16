@@ -50,7 +50,7 @@ or `WIRESHARK_PLUGIN_DIR=<folder holding hpqv.lua>`.)
 |---|---|---|
 | 1 | `tls.handshake.type == 1` | The ClientHello. *key_share* carries an **X25519MLKEM768 (0x11ec)** share of 1216 B, listed first (OpenSSL also offers plain x25519). *signature_algorithms* includes **mldsa65 (0x0905)**. Wireshark 4.6 names both; older builds may print the numbers only. |
 | 2 | `tls.handshake.type == 2` | The ServerHello: the chosen group is **X25519MLKEM768**. The app closes the connection if any other group is negotiated. |
-| 3 | `tls.record.content_type == 23` | Everything after the ServerHello is encrypted, **including both ML-DSA-65 certificates**: an eavesdropper cannot even see whose certificate it is. *Statistics → Conversations → TCP* shows the size: about 20 kB over TCP in the sample capture, many times a 1500-byte MTU. |
+| 3 | `tls.app_data` | Everything after the ServerHello is encrypted, **including both ML-DSA-65 certificates**: an eavesdropper cannot even see whose certificate it is. *Statistics → Conversations → TCP* shows the size: about 21 kB over TCP in the sample capture (10 kB one way, 11 kB the other), many times a 1500-byte MTU. |
 | 4 | `ip.flags.mf == 1 or ip.frag_offset > 0` | **Nothing.** No IP fragments: TCP segments the big handshake itself. |
 | 5 | `hpqv` | One line per voice packet: `hpqv v2 voice seq=… gen=… len=…`. Header fields (sequence, session id, key generation) are readable; the payload is labelled *Encrypted Opus frame + Poly1305 tag*. |
 | 6 | `udp.length > 1208` | **Nothing.** No voice datagram exceeds the 1200-byte payload cap. |
