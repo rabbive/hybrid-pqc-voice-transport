@@ -206,3 +206,38 @@ class Keyring:
 - Commit on your worktree branch with a clear message ending with
   `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (Sonnet threads use
   their own model name). Do not push.
+
+## Wave 2 interface (T4 implements it; T5 calls it)
+
+```python
+# src/hpqv/callctl.py
+class CallHandle:
+    def start(self, channel: SecureChannel, stats, stop_event) -> Keyring
+        # builds Keyring(channel.media_keys()); a reader thread applies KEY_ROTATE
+        # and CALL_END from channel.recv(timeout=POLL)
+    # rotate_keys, rotation_ready, hang_up, key_generation, finish: same as v1.
+    # key_fingerprint() is replaced by sas() -> channel.sas().
+    # peer_ended (an authenticated CALL_END) and connection_lost (TCP gone)
+    # are reported separately.
+
+# src/hpqv/demo.py
+def _run_call(channel, udp_sock, dest, args, stats=None, controls=None,
+              stop_event=None, call_handle=None, rng_seed=None, quiet=False) -> None
+def establish_timed(role, sock, ident, peer_cert_pem, stats) -> SecureChannel
+    # replaces timed_handshake; copies channel.handshake_ms / handshake_bytes /
+    # group / cipher / peer_fingerprint into stats
+def handshake_info() -> dict   # static facts, no liboqs:
+    # {"protocol": "TLSv1.3", "group": "X25519MLKEM768", "sig": "ML-DSA-65",
+    #  "transport": "TCP", "udp_fragments": 0, "datagram_cap": 1200}
+class Stats: v1 fields plus group: str, cipher: str, peer_fingerprint: str, sas: str
+    # and rejects: dict[str, int], mirrored from Keyring.rejects by the receiver loop
+# CLI:
+#   keygen --name NAME --key-out PATH --cert-out PATH   (prints the fingerprint)
+#   listen/call --key PATH --cert PATH --peer-cert PATH  (--identity-file removed;
+#   pointing --peer-cert at a v1 identity.json exits with the LegacyIdentityError message)
+# call_args(**overrides) stays; its fields follow the new flags (key, cert, peer_cert).
+```
+
+The receiver loop calls `recvfrom(packet.MAX_DATAGRAM + 1)`. A `packet.Reject` is
+counted by the Keyring and the datagram is dropped; it never touches
+`stats.received`, `RxMeter` or the jitter buffer.
