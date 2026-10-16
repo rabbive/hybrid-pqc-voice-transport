@@ -1,6 +1,7 @@
 # hpqv protocol v2
 
-Status: **Phase B design. Implementation in progress. Not externally reviewed.**
+Status: **Phase B implemented (B1 security foundation and B2 no-files pairing).
+Experimental. Not externally reviewed. GATE 1 review pending.**
 Branch: `feat/secure-session-v2`. v1 (`experiment/cain`, release
 v0.1.0-demo.1, every file under `results/`) is unchanged. v2 does not
 interoperate with v1 and never falls back to it.
@@ -126,8 +127,9 @@ s_client`) read 10,318 and wrote 10,361 bytes, about 20.7 KB in total including
 TLS framing. In the app, `SecureChannel.handshake_bytes` measured 20,714 B in
 both directions together (two-process CLI call on 2026-10-16, before the B1
 offer restriction). The B1 change removes the 32 B classical key share and the
-extra group and signature IDs, so the figure is now slightly lower; it has not
-been re-measured.
+extra group and signature IDs. One two-process CLI call to a paired friend on
+127.0.0.1 after B1 (2026-10-16, this branch) printed `66.4 ms, 20670 B,
+X25519MLKEM768`. That is a single sample on loopback, not a benchmark.
 
 ## 4. Identity model
 
@@ -151,34 +153,138 @@ been re-measured.
 
 Instead of exchanging certificate files, two devices on the same Wi-Fi can
 pair. The design and its limitations are in
-[reviews/2026-10-16-b2-pairing-design.md](reviews/2026-10-16-b2-pairing-design.md).
+[reviews/2026-10-16-b2-pairing-design.md](reviews/2026-10-16-b2-pairing-design.md);
+the decision is [ADR-0006](adr/0006-lan-pairing-tofu-with-code-confirmation.md).
 
 - **Device identity:** each device creates its own identity in its app directory
   (`hpqv.paths`; `HPQV_HOME` overrides it).
-- **The pairing exchange:**
-  - it runs on a **separate ALPN, `hpqv-pair/1`**;
-  - the listener accepts it only while the user has opened a 2-minute window,
-    one pairing at a time, at most 3 attempts;
-  - it is a commit-then-reveal exchange that derives a 6-digit code from the RFC
-    9266 channel binding, both fingerprints and both nonces (`hpqv.pairing`);
-  - both users must press "Codes match".
-- **Saving:** the friend is stored (`hpqv.trust`, keyed by fingerprint, written
-  atomically, owner-only) only after the local yes **and** the peer's
-  `CONFIRM = 1`.
-- **Separation from calls:** a pairing channel has no voice keys, and the call
-  setup refuses it. Calls then use the unchanged `hpqv/2` path, pinned to the
-  stored friends.
-- **Discovery** (`hpqv.discovery`) is a UDP broadcast of hints. It is never
-  trusted.
+- **Separate ALPN, `hpqv-pair/1`.** The TLS settings are the same as for calls
+  (TLS 1.3 only, X25519MLKEM768 only, ML-DSA-65 only, no resumption). The
+  difference is the pin policy: a pairing channel accepts any ML-DSA-65 key
+  **except this device's own**, because the point is to learn a new key. The
+  post-handshake check then sets `mode = "pair"`.
+  - A pairing channel carries no voice keys: `media_keys()` raises.
+  - A call (`hpqv/2`) always needs a pinned key, even on a listener that also
+    accepts pairing (`secure._check_negotiated`).
+- **The listener's window** (`hpqv.pairing.PairingWindow`, `hpqv.listener`):
+  pairing is accepted only while the user has opened a 120 s window, one pairing
+  at a time, at most 3 attempts per opening. A "codes differ", a failed
+  commitment check or a peer decline closes the window. Stray connections do not
+  stop the accept loop; at most `MAX_HANDSHAKES` (4) handshakes run at once and
+  the rest are closed.
+- **Saving.** The friend is stored (`hpqv.trust`, section 4b) only after the
+  local user said yes **and** the peer's `CONFIRM = 1` arrived.
+- **Discovery** (`hpqv.discovery`, section 4c) is a UDP broadcast of hints. It is
+  never trusted.
 - **CLI:** `python -m hpqv.demo pair --allow` on one device and `pair
   <device|HOST:PORT>` on the other; then `listen` / `call <friend|HOST:PORT>`
-  with no identity flags. `peers` and `forget` manage friends. The file-based
-  flags still work as before.
+  with no identity flags. `peers` lists friends and nearby devices (`paired`,
+  `new`, `key changed?`); `forget` removes a friend. The file-based flags
+  (`--key/--cert/--peer-cert`) still work, pin only and never pair.
 - **GUI:** leaving the three identity fields empty uses this device's identity
-  and paired friends; the "Pair a device" box runs pairing.
+  and the paired friends. The "Pair a device" box has "Allow new device (2 min)"
+  and "Pair with…" (a `HOST:PORT` or device name), and a yes/no dialog shows the
+  code. The GUI does not yet show a list of nearby devices; the CLI `peers`
+  command does.
 - **Experimental:** this is our own application of the Bluetooth/ZRTP
   commit-then-reveal pattern. It is not formally verified or externally
   reviewed.
+
+#### Pairing messages
+
+All messages travel as TLS application data on the `hpqv-pair/1` channel, in the
+section 6 frame (`msg_type ‖ length ‖ payload`). R = responder = the listener
+(TLS server), I = initiator = the device that pairs (TLS client). `CB` is the RFC
+9266 channel binding (exporter label `EXPORTER-Channel-Binding`, empty context,
+32 B). `fpX` is the SHA-256 of device X's raw ML-DSA-65 public key, taken from
+the certificate TLS authenticated. `nX` is 32 random bytes.
+
+| Step | Message | Type | Payload |
+|---|---|---|---|
+| 1 | R to I `MSG_READY` | 4 | as in section 3 |
+| 2 | R to I `MSG_COMMIT` | 0x12 | `C = SHA-256("hpqv-pair/1 commit\0" ‖ CB ‖ fpR ‖ fpI ‖ nR)`, 32 B |
+| 3 | I to R `MSG_NONCE` | 0x13 | `nI`, 32 B, drawn only after `C` arrived |
+| 4 | R to I `MSG_REVEAL` | 0x14 | `nR`, 32 B. I checks `C`; a mismatch is `bad_commit` |
+| 5 | both `MSG_CONFIRM` | 0x15 | 1 byte: `0x01` = this user pressed "Codes match", `0x00` = no, cancel or timeout |
+
+Each of steps 2-4 has a 10 s timeout (`STEP_TIMEOUT`); the human decision has 60 s
+(`DECISION_TIMEOUT`). A message of the wrong type or length is a `protocol`
+failure. A broken UI callback counts as "no". On every failure nothing is saved
+and both nonces are overwritten (best effort, since Python may have copied them).
+
+#### The code (what the 48-bit plan became)
+
+The comparison code is
+
+```
+code = int.from_bytes(SHA-256("hpqv-pair/1 code\0" ‖ CB ‖ fpI ‖ fpR ‖ nI ‖ nR)[0:4], "big") mod 10^6
+shown as "ddd ddd"
+```
+
+It is **6 decimal digits, about 19.9 bits**, not 48 bits. The final plan
+(Task 2) first specified a 48-bit exporter-derived code without a commitment
+step, to push an attacker's grinding out of reach. Design revision 3 replaced it
+with the commit-then-reveal ordering above, which prevents grinding instead of
+pricing it, so a short code is enough. The reason, in one line as the plan asked:
+*without a commitment step an active man-in-the-middle can grind its own session
+to steer one side's code; the commitment fixes the attacker's values before it
+sees the honest nonce.* `pairing.comparison_code` is the reference.
+
+- **What it gives:** an attacker relaying two TLS sessions cannot choose its values
+  so that the two codes match. Its chance per attempt is about 1 in 10^6 and a
+  window allows 3 attempts, so about 3 in 10^6 per opened window. This is
+  arithmetic from the code length and the limits, assuming SHA-256 behaves as a
+  random function; it is not a measurement.
+- **What it does not give:** it authenticates nobody, keeps nothing secret and
+  does not decide trust by itself. That the users really compare is an
+  assumption: if both press "Codes match" without comparing, an active attacker
+  wins.
+- **Separate from the call code.** After a call is established, the GUI and CLI
+  also show `sas` (exporter label `EXPORTER-hpqv2 sas`, 4 bytes, 8 hex
+  characters; section 5). It is informational: both ends are already pinned, so
+  it is not part of the trust decision and is not the pairing code.
+
+### 4b. Trust store
+
+`hpqv.trust.TrustStore` (`trust.json` in the app directory) holds the paired
+friends. Only certificates are stored, which are public.
+
+- A friend is a record `(fingerprint, label, cert_pem, paired_at)`. The key is
+  the **fingerprint**. The label is the certificate CN, truncated to 32
+  printable characters, and is only for display.
+- It is written only by a completed pairing. The same fingerprint refreshes its
+  record. A **different key under a known name is a separate entry**: the prompt
+  shows "key changed" and requires a fresh code check, and the old record is kept
+  until the user runs `forget`. Nothing is replaced silently.
+- Writes are atomic (temp file in the same directory, `fsync`, `os.replace`) and
+  owner-only. An unreadable or inconsistent file raises `TrustStoreError` instead
+  of being overwritten, and each record's fingerprint is re-derived from its
+  certificate when read.
+- Not protected: another program running as the same user can edit the file.
+
+### 4c. Discovery
+
+`hpqv.discovery` announces this device on the LAN so that another device can list
+it. It is a phonebook, not a trust signal.
+
+- A UDP broadcast on port 47123 every 2 s, each message at most 512 B of JSON:
+  `app`, `v` (2), `name` (at most 32 printable characters), `port` (TCP),
+  `fp` (the first 16 hex characters of the identity fingerprint) and `pairing`
+  (whether a window is open). Anything malformed, oversized or of the wrong type
+  is dropped.
+- Entries expire after 6 s; at most 64 are kept and a new one is ignored when
+  the table is full; a device ignores its own announcement. The receive buffer
+  is `MAX_ANNOUNCE + 1` bytes.
+- A failed `sendto` (client-isolated or broadcast-blocked Wi-Fi, firewall) is
+  swallowed: the list stays empty and a call by `HOST:PORT` still works.
+- Trust is keyed by fingerprint, never by name. Two devices announcing the same
+  name appear as separate entries. In the CLI `peers`, a known fingerprint hint
+  is marked `paired`; an unknown one under a known name is `key changed?`; an
+  unknown one under an unknown name is `new`. The hint is 64 bits of the
+  fingerprint and is a display aid only; the pin in TLS decides.
+- A spoofed announcement can cause a wrong list entry or a connection attempt to
+  the wrong address. It cannot create trust, because pairing needs both users to
+  confirm the code and a call needs the pinned key.
 
 ## 5. Key derivation
 
@@ -342,6 +448,7 @@ port), peer identities, session keys.
 | Downgrade resistance | TLS 1.3 only, one required group, one required ALPN, no resumption; any mismatch closes the connection |
 | Control integrity, replay and order protection | TLS record layer (section 6) |
 | Media confidentiality, integrity, replay protection, session binding | Section 7 and 8 |
+| A new friend's key is learned only if both users confirm a code (pairing, section 4a) | Separate ALPN with no voice keys; commit-then-reveal code; save only after both `CONFIRM = 1`; window, attempt and handshake limits. **Experimental, our construction, not formally verified** |
 | Bounded resources under unauthenticated input | Control length cap before allocation, datagram size checks first, one AEAD per datagram, handshake deadline |
 
 **Out of scope.**
@@ -362,21 +469,52 @@ port), peer identities, session keys.
 
 ### Implemented and tested
 
-| Item | Status |
+Source of every count: one full run on this branch on macOS, 2026-10-16, with
+`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib PYTHONPATH=src
+.venv/bin/python -m pytest -q -p no:cacheprovider --ignore=tests/test_gui_window.py`.
+Last line: `544 passed, 15 skipped, 1 warning in 112.13s (0:01:52)`. Counts below are
+the test cases per file in that run's JUnit XML (all passed unless stated).
+The 15 skips are the Linux `tc`/`tshark` and ns-3 tests in `tests/eval/`, which run
+only in the evaluation container. The 9 Tk window tests in
+`tests/test_gui_window.py` are excluded from this command (568 tests collected
+in all) and were **not** run for this table.
+
+| Item | Test file and count |
 |---|---|
-| `hpqv.identity` (ML-DSA-65 self-signed identity, fingerprint, v1 refusal) | TO BE FILLED AFTER WAVE 2 |
-| `hpqv.secure` (TLS 1.3 channel, group/ALPN/pin enforcement, READY, exporter keys, SAS) | TO BE FILLED AFTER WAVE 2 |
-| `hpqv.packet` (v2 datagram, `direction_keys`, `next_secret`, reject reasons) | TO BE FILLED AFTER WAVE 2 |
-| `hpqv.replay` (256-packet window, check/accept split) | TO BE FILLED AFTER WAVE 2 |
-| `hpqv.keyring` (rotation, retention, check order, reject counters) | TO BE FILLED AFTER WAVE 2 |
-| Integration of v2 into call, GUI and telemetry | TO BE FILLED AFTER WAVE 2 |
-| `cryptography` ML-KEM-768 and ML-DSA-65 against NIST ACVP vectors | Added in commit 92412b4; results to be filled by the coordinator |
+| `hpqv.identity` (ML-DSA-65 self-signed identity, fingerprint, v1 refusal) | `tests/test_identity.py` 11; CLI identity handling `tests/test_demo_identity.py` 24 |
+| `hpqv.secure` (TLS 1.3 channel, group/ALPN/pin enforcement, READY, exporter keys, SAS) | `tests/test_secure.py` 47; T6 review regressions `tests/test_t6_regressions.py` 36; independent TLS stack (Go 1.27 `crypto/tls`) `tests/test_interop_go.py` 4 |
+| `hpqv.packet` (v2 datagram, `direction_keys`, `next_secret`, reject reasons) | `tests/test_packet.py` 14 |
+| `hpqv.replay` (256-packet window, check/accept split) | `tests/test_replay.py` 9 |
+| `hpqv.keyring` (rotation, retention, check order, reject counters) | `tests/test_keyring.py` 27 |
+| Integration of v2 into call, GUI and telemetry (call control, control channel, UDP, loss control, playout, telemetry, GUI logic and shell) | `tests/test_call.py` 3, `test_callctl.py` 18, `test_control.py` 3, `test_udp.py` 1, `test_loss_control.py` 6, `test_playout.py` 24, `test_telemetry.py` 17, `test_gui_logic.py` 34, `test_gui_shell.py` 29, `test_demo_loop.py` 7 |
+| Pairing, trust store, listener (`hpqv.pairing`, `hpqv.trust`, `hpqv.listener`) | `tests/test_pairing.py` 31 |
+| Discovery (`hpqv.discovery`) | `tests/test_discovery.py` 6 |
+| Pairing and a pinned call through the real CLI, one process per device | `tests/test_pair_cli.py` 4 |
+| `cryptography` ML-KEM-768 and ML-DSA-65 against NIST ACVP vectors (added in commit 92412b4) | `tests/test_pqc_kat.py` 101 |
+| Docs agree with committed v1 results | `tests/test_docs_current.py` 1 |
 | Spike on this machine (not a repo test): X25519MLKEM768 negotiated, mutual ML-DSA-65 auth, exporter equal on both sides; wrong pin, classical-only peer and missing client certificate all refused | Observed 2026-10-16 with pyOpenSSL 26.4 and OpenSSL 4.0.2 |
+
+**Live two-process pairing and call on 127.0.0.1** (2026-10-16, two CLI
+processes with separate `HPQV_HOME`, answers `y` piped on stdin, so no person
+compared the codes in this run): both printed the code `786 403`; each listed the
+other's fingerprint as a friend; a call then connected with the code `15944f99`,
+group X25519MLKEM768, and ended with `sent=150 received=150 dropped=0`. The
+transcript is in the GATE 1 report, not committed.
+
+**Known test instability on this machine, not fixed in this task.** In five full
+runs on this branch, `tests/test_pairing.py::test_listener_pairs_through_window_and_survives_stray_connections`
+failed in three (`ConnectionResetError` from `connect()` during its burst of 100
+stray connections; the listener's backlog is 8). A fourth run had one failure that
+was not identified, and the fifth, the run quoted above, had none. Run alone, it failed
+2 times out of 2. In one of the runs `tests/eval/test_full_handshake.py` also failed
+on a timing bound (`median_ms < 45`, observed 45.37). The cause of the
+`ConnectionResetError` has not been established.
 
 ### Assumptions
 
 - **A1.** Certificates are exchanged over an authentic out-of-band channel and
-  users compare fingerprints.
+  users compare fingerprints, or, for paired friends, the two users really
+  compare the 6-digit pairing code (section 4a).
 - **A2.** OpenSSL 4.0.2 and `cryptography` implement TLS 1.3, ML-KEM-768,
   ML-DSA-65, X25519, ChaCha20-Poly1305 and HKDF correctly, without exploitable
   side channels. Known-answer tests show correctness on the tested inputs only.
@@ -392,11 +530,21 @@ port), peer identities, session keys.
 
 - That the v2 implementation is correct and secure. It has not been reviewed
   outside the project (wave 3 internal security review is pending).
-- Every v2 size, latency and CPU figure measured in the app. The only handshake
-  size figure is the CLI probe in section 3.
+- Every v2 size, latency and CPU figure measured in the app. The handshake size
+  figures are the CLI probe and the single loopback call in section 3.
 - That the 256-packet window never rejects legitimate traffic under every
   impairment setting.
 - Behaviour on platforms other than macOS (Linux, Windows) with the bundled
   OpenSSL 4.0.2.
 - The classical-only benchmark module and its isolation test (Phase D).
-- A formal or symbolic model. None exists.
+- A formal or symbolic model. None exists, including for the pairing exchange
+  (section 4a).
+- Pairing on two real devices over real Wi-Fi. Only 127.0.0.1 has been run.
+- That a person who is shown the code actually compares it. The design assumes
+  they do (limitation 1 in the pairing design).
+- Discovery on a real LAN: the tests cover loopback and a simulated blocked
+  broadcast only.
+- The GUI pairing window on screen: `tests/test_gui_window.py` is not part of the
+  command above.
+- A GUI list of nearby devices. The GUI takes a `HOST:PORT`; only the CLI
+  resolves names through discovery.

@@ -47,7 +47,9 @@ pattern for media keys).
 - **Authentication:** mutual, with a self-signed ML-DSA-65 certificate per peer.
   Each peer pins the other's exact public key in the verify callback. No CA.
 - **ALPN:** `hpqv/2` required on both sides, so the application protocol
-  version is part of the TLS transcript.
+  version is part of the TLS transcript. A listener whose user has opened a
+  pairing window also accepts `hpqv-pair/1`, which never carries a call or voice
+  keys (ADR-0006).
 - **Ready message:** the server sends `MSG_READY` after accepting the client
   certificate; the client waits for it before sending anything else, because a
   TLS 1.3 client finishes before the server checks it.
@@ -68,8 +70,9 @@ pattern for media keys).
   pin checking, group/ALPN enforcement, framing, and the UDP layer.
 - Handshake traffic is larger. v1 was 10,844 B of payload. A CLI probe of the
   v2-style handshake with ML-DSA-65 certificates (`openssl s_client`) read
-  10,318 and wrote 10,361 bytes, about 20.7 KB including TLS framing. This has
-  not been measured inside the app.
+  10,318 and wrote 10,361 bytes, about 20.7 KB including TLS framing. In the app, one two-process CLI call on
+  127.0.0.1 after the B1 fixes reported 20,670 B and 66.4 ms (2026-10-16, a single
+  sample, not a benchmark; `docs/PROTOCOL-v2.md` section 3).
 - We depend on the OpenSSL bundled in `cryptography` 50 (4.0.2) and on pyOpenSSL
   26.4, not on the OS OpenSSL. Wheels must carry it on every platform we ship.
   Linux and Windows behaviour is untested.
@@ -83,6 +86,10 @@ pattern for media keys).
 - v1 and v2 do not interoperate. A v1 peer fails at the first byte and is
   reported as such. There is no downgrade path.
 - Memory zeroisation is still not possible in Python.
+- Pinning needs the peer's key to reach the other device. The file swap is the
+  baseline; no-files pairing on the same LAN is decided separately in
+  [ADR-0006](0006-lan-pairing-tofu-with-code-confirmation.md). This ADR stays
+  **Proposed**.
 
 ## Alternatives considered
 
