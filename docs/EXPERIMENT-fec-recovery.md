@@ -72,15 +72,17 @@ silent/zero frame, same as the no-FEC baseline).
    of this experiment failed: it showed FEC-off *improving* from 20% to 30% loss, a direct
    symptom of measuring against the wrong signal.
 3. **`frames_recovered_by_fec` tracks loss almost 1:1** at moderate loss (e.g. 10/11 lost frames
-   recovered at 10% loss), confirming recovery is actually firing, not just configured.
+   at 10% loss). It counts lost frames whose successor arrived (where `decode_fec` ran); it does
+   not itself check for LBRR (see the LBRR check under limitations).
 4. **FEC-on's advantage shrinks in relative terms at high loss (30%)** but is still large (24 dB).
    At 30% loss, consecutive losses become common, so a lost packet's successor is often *also*
    lost — FEC has nothing to decode from and both receivers fall back to the same zero-frame
    concealment for those frames. This is the expected behavior of a single-frame-lookahead
    recovery scheme, not a bug.
 5. **At 0% loss, FEC-on and FEC-off are both at the cap** — the reconstruction is bit-identical to
-   the reference (nothing was ever dropped), so there is nothing to measure loss damage from. FEC
-   costs nothing in reconstruction quality when nothing is lost.
+   the reference (nothing was ever dropped), so there is nothing to measure loss damage from. This
+   metric cannot show FEC's cost at 0 % loss, because each variant is compared with its own clean
+   decode.
 
 **Bottom line: FEC demonstrably helps**, and now by a metric that isolates the effect correctly:
 decoding the next packet with `decode_fec=True` reconstructs frames that would otherwise be
@@ -89,8 +91,8 @@ where recovery can act.
 
 ## Honest limitations
 
-- Segmental SNR in the time domain is still not a perceptual quality metric (unlike PESQ/MOS used
-  elsewhere in this repo for the voice path) — it measures waveform distance, not perceived
+- Segmental SNR in the time domain is still not a perceptual quality metric, and the repo has
+  none (MOS elsewhere is an E-model estimate) — it measures waveform distance, not perceived
   loudness/pitch/masking effects. Fixed here by referencing the undamaged decode instead of the
   raw input (see Method), which removes the codec's own coding error from the measurement, but it
   still won't rank two *audibly similar* reconstructions correctly if they differ in ways the ear
@@ -104,6 +106,19 @@ where recovery can act.
 - Loss is independent per-packet (seeded RNG), not a Gilbert-Elliott burst model. Real network
   loss is bursty, which would shrink the fraction of losses FEC can recover (fewer isolated
   single-packet losses with a surviving successor).
+- **Live path:** `hpqv.playout.Playout` uses the same `decode_fec` step in the real receiver
+  (`demo._receiver_loop`), with Opus concealment instead of silence for frames it cannot
+  rebuild: a gap triggers `decode_fec` on the next packet only when that packet carries LBRR,
+  earlier frames of a burst use Opus packet-loss concealment, and the CLI/GUI show a
+  `recovered` counter. This experiment itself is still offline.
+- Whether `decode_fec` returns real LBRR data or just concealment depends on the encoder having
+  picked a SILK/hybrid mode. On the synthetic chirp it does: with `OpusCodec(fec=True)` all 150
+  packets are hybrid mode (TOC config 13 ×141, 15 ×9) on both libopus 1.6.1 (macOS arm64) and
+  libopus 1.4 (the Linux arm64 container). On 1.6.1, `opus_packet_has_lbrr` is true for 149/150
+  packets; 1.4 lacks that call, but on both versions `decode_fec` output differs from plain
+  concealment for 148/148 interior packets (0/148 for a FEC-off encoder). So `decode_fec` uses
+  real LBRR data here. Apple arm64 FEC is fixed with a padded variadic call; the saved results
+  came from the Linux container.
 - 3-second synthetic chirp, not real speech. It exercises the codec across a frequency sweep but
   is not a substitute for a MOS-style listening test.
 

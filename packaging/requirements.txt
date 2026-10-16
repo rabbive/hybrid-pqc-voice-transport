@@ -1,5 +1,6 @@
 # Build environment only. Install the project separately with --no-deps.
 cryptography==50.0.1
+matplotlib==3.11.1
 liboqs-python==0.16.0
 numpy==2.4.6
 opuslib==3.0.1

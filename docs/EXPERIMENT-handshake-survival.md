@@ -4,6 +4,11 @@
 **Code:** `src/hpqv/eval/handshake_survival.py`, `scripts/run_handshake_survival.py`
 **Data:** `results/handshake_survival.csv`, `results/handshake_survival.png`
 
+> **Superseded as the headline by [EXPERIMENT-full-handshake.md](EXPERIMENT-full-handshake.md).** This run sends a random
+> 10,842-byte blob with a 1 s UDP timeout against a 20 s TCP timeout and does not run the authenticated
+> handshake. Quote the full-handshake numbers (84 % vs 18 % at 20 % loss, one 3 s deadline) for
+> "does a real call set up"; keep this one as the earlier experiment.
+
 ## Why this experiment exists
 
 The main evaluation (Track 2) proves a **structural** property: our hybrid transport produces
@@ -28,7 +33,7 @@ For each packet-loss level, attempt 100 handshakes over each transport and count
 | Transport | How the 10,842-byte handshake is sent | Fragments |
 |---|---|---|
 | `naive` | one oversized UDP datagram, no app framing | **8** |
-| `hybrid` | over TCP, app-framed under the MTU (our design) | **0** |
+| `hybrid` | over TCP, one length-prefixed record (kernel segments to MSS) (our design) | **0** |
 
 - Loopback MTU pinned to **1500** (Docker defaults it to 65536, where nothing fragments).
 - Loss applied with `tc netem` at 0 / 5 / 10 / 20 / 30 %.

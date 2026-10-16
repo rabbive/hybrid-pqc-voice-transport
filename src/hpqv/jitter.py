@@ -19,7 +19,7 @@ class JitterBuffer:
         seq, frame = heapq.heappop(self._heap)
         self._seen.discard(seq)
         self._last = seq
-        return frame
+        return seq, frame
 
     def flush(self):
         out = []
@@ -27,5 +27,5 @@ class JitterBuffer:
             seq, frame = heapq.heappop(self._heap)
             self._seen.discard(seq)
             self._last = seq
-            out.append(frame)
+            out.append((seq, frame))
         return out
