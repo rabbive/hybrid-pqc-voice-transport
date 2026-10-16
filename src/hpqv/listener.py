@@ -29,7 +29,10 @@ def bind_listener(host: str, port: int) -> socket.socket:
     else:
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind((host, port))
-    srv.listen(8)
+    # A short backlog makes the kernel reset connections that arrive in a burst (a
+    # port scan on the WiFi resets a real caller too); handshakes are bounded by
+    # MAX_HANDSHAKES, not by this queue.
+    srv.listen(socket.SOMAXCONN)
     return srv
 
 

@@ -486,7 +486,10 @@ def test_listener_pairs_through_window_and_survives_stray_connections(tmp_path):
                    handshake_timeout=2).start()
     try:
         for _ in range(100):                     # port scans / stray connects
-            socket.create_connection(("127.0.0.1", lst.port)).close()
+            try:
+                socket.create_connection(("127.0.0.1", lst.port)).close()
+            except ConnectionResetError:         # kernel backlog overflow: fine for a scanner
+                pass
         with pytest.raises(HandshakeError):      # window closed: pairing refused
             _connect_pair(lst.port, store=TrustStore(tmp_path / "b0.json"))
         window.open()
