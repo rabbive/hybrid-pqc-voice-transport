@@ -242,3 +242,11 @@ def test_snapshot_for_export_is_independent_of_later_samples():
     live.events.clear()
     assert snap.rows == [{"t_s": 1.0}] and snap.events == [{"t": 1.0}]
     assert snap.marker == "kept" and snap is not live
+
+
+def test_pairing_prompt_shows_code_and_warns_on_changed_key():
+    from hpqv.gui_logic import pairing_prompt
+    title, body = pairing_prompt("123 456", "bob", "0000 " * 15 + "abcd", False)
+    assert "123 456" in body and "bob" in body and "WARNING" not in body
+    _, warned = pairing_prompt("123 456", "bob", "0000 " * 15 + "abcd", True)
+    assert warned.startswith("WARNING") and "different" in warned

@@ -7,7 +7,7 @@ signed approvals, automatic recovery and the full Windows inventory, is kept in
 [2026-10-16-b2-pairing-design-rev2-detailed.md](2026-10-16-b2-pairing-design-rev2-detailed.md)
 as reference only.
 
-**Status: design proposal.** Not formally verified, not externally reviewed,
+**Status: implemented (B2, `feat/secure-session-v2`), experimental.** Not formally verified, not externally reviewed,
 not production-secure.
 
 ## 1. The user flow
@@ -78,6 +78,38 @@ codes. Each attempt gives it about **1 chance in 10⁶**.
 **What is ours.** This is our own application of that published pattern to the
 inputs above, using SHA-256. Neither Bluetooth's nor ZRTP's analysis covers it.
 It is **not formally verified**.
+
+## 3a. What each part provides, and what the whole protocol guarantees
+
+**The commit-then-reveal step provides one property only:** an attacker
+relaying two TLS sessions cannot choose its values so that both codes match. It
+gets about one chance in 10⁶ per attempt. This step does **not** authenticate
+anyone, does not keep anything secret, and does not decide trust.
+
+| Property | Provided by | Status |
+|---|---|---|
+| Each side holds the private key for the certificate it presents | TLS 1.3 CertificateVerify (B1) | Library behaviour (OpenSSL 4.0.2), interop-tested in B1 |
+| Pairing messages are confidential, intact, in order, and can't be replayed into another session | TLS 1.3 record protection (B1) | Library behaviour |
+| Both sides compute the code over the same session | RFC 9266 channel binding `CB` in every hash | Standard exporter; equal on both ends (B1 interop) |
+| The two codes can't be steered to match | commit-then-reveal ordering | **Experimental, our construction**, with the argument in §3 |
+| The person approving has compared the codes | the users | **Assumption**, not enforced; see limitation 1 |
+| A trusted friend is saved only if **both** users approved | the `CONFIRM` exchange, and saving only after receiving the peer's `CONFIRM = 1` | Our protocol logic; tested |
+| Pairing can never become a call or obtain voice keys | separate ALPN; `media_keys()` refused on pairing channels; the call path checks the mode | Our code; tested |
+
+**What the complete protocol guarantees, if the users really compare:**
+- After a successful pairing, each device's store holds the key the other
+  device proved it owns.
+- An active man-in-the-middle succeeds only with probability about 10⁻⁶ per
+  attempt, and within the §4 limits.
+
+**What it does not guarantee:**
+- that both sides finish together (§5, limitation 4);
+- that the peer is the person you *intended* (only the label and fingerprint tell
+  you that);
+- anything at all if a device is compromised.
+
+The whole protocol is **experimental**: not formally verified and not
+externally reviewed.
 
 ## 4. Simple abuse limits
 - Pairing is possible only inside a window the user opened, for at most 2 minutes.

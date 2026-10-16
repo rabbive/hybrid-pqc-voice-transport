@@ -375,3 +375,61 @@ def test_identity_section_has_three_pickers_and_create_button(monkeypatch):
     assert "Create identity" in buttons and buttons.count("…") >= 4     # 3 identity + 1 WAV
     note = next(t for t in labels if "Never share the .key" in t)
     assert ".crt" in note
+
+
+# ---------------- B2: pairing hooks ----------------
+
+def test_identity_files_all_empty_means_friend_mode_and_partial_is_refused(monkeypatch):
+    from hpqv import gui_panels
+    monkeypatch.setattr(gui_panels, "tk", MagicMock())
+    monkeypatch.setattr(gui_panels, "ttk", MagicMock())
+    panel = gui_panels.ConnectionPanel(MagicMock(), on_create_identity=lambda: None)
+    values = {"mode": "listen", "port": "9000", "target": "x:1", "source": "mic", "wav": "",
+              "record_path": ""}
+    for name, v in {**values, "key": "", "cert": "", "peer_cert": "", "record": False}.items():
+        var = MagicMock()                  # each Tk variable its own mock
+        var.get.return_value = v
+        setattr(panel, name, var)
+    assert panel.read()["friends"] is True
+    panel.key.get.return_value = "me.key"
+    with pytest.raises(ValueError, match="leave all three empty"):
+        panel.read()
+
+
+def test_worker_in_friend_mode_without_friends_says_pair_first(monkeypatch, tmp_path):
+    monkeypatch.setenv("HPQV_HOME", str(tmp_path))
+    win = make_window()
+    cfg = {"mode": "call", "port": 9000, "target": "127.0.0.1:9", "friends": True,
+           "key": "", "cert": "", "peer_cert": "", "input": "mic", "wav": None,
+           "record_wav": None, "stop": threading.Event(), "stats": Stats(),
+           "handle": win.call_handle}
+    win.controls = MagicMock(get=lambda k: 0)
+    win._run(cfg)
+    events = []
+    while not win.events.empty():
+        events.append(win.events.get_nowait())
+    assert ("state", "no paired devices yet: use Pair a device first") in events
+    assert events[-1] == ("done", None)
+
+
+def test_ask_user_shows_the_code_and_returns_the_answer(monkeypatch):
+    win = make_window()
+    win.root.after.side_effect = lambda ms, fn: fn()
+    shown = {}
+
+    def ask(title, body):
+        shown["title"], shown["body"] = title, body
+        return True
+    monkeypatch.setattr(gui.messagebox, "askyesno", ask)
+    assert win._ask_user("123 456", "bob", "a" * 79, False, threading.Event()) is True
+    assert "123 456" in shown["body"] and "bob" in shown["body"]
+
+
+def test_ask_user_is_no_when_the_peer_cancels_first(monkeypatch):
+    win = make_window()
+    win.root.after.side_effect = lambda ms, fn: None          # dialog never answers
+    cancel = threading.Event()
+    threading.Timer(0.2, cancel.set).start()
+    t0 = time.monotonic()
+    assert win._ask_user("123 456", "bob", "a" * 79, False, cancel) is False
+    assert time.monotonic() - t0 < 3

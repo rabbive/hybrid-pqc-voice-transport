@@ -15,6 +15,7 @@ import warnings
 from dataclasses import dataclass, field
 
 from cryptography import x509
+from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import mldsa
 from OpenSSL import SSL, crypto
 from OpenSSL.SSL import _lib
@@ -24,7 +25,9 @@ from hpqv import identity
 log = logging.getLogger(__name__)
 
 GROUP = "X25519MLKEM768"
-ALPN = b"hpqv/2"
+ALPN = b"hpqv/2"            # calls: only pinned peers, voice keys
+PAIR_ALPN = b"hpqv-pair/1"  # pairing only (docs/reviews/2026-10-16-b2-pairing-design.md):
+                            # accepts an unpinned peer, never carries a call or voice keys
 PROTOCOL = "TLSv1.3"
 SIGALG = b"mldsa65"         # TLS SignatureScheme 0x0905 (draft-ietf-tls-mldsa)
 HANDSHAKE_TIMEOUT = 10.0
@@ -40,6 +43,7 @@ _LABEL_C2S = b"EXPORTER-hpqv2 media c2s"
 _LABEL_S2C = b"EXPORTER-hpqv2 media s2c"
 _LABEL_SESSION_ID = b"EXPORTER-hpqv2 session id"
 _LABEL_SAS = b"EXPORTER-hpqv2 sas"
+_LABEL_CB = b"EXPORTER-Channel-Binding"   # RFC 9266 tls-exporter channel binding
 
 
 class HandshakeError(Exception):
@@ -64,9 +68,20 @@ def _raw_key(cert) -> bytes | None:
     return key.public_bytes_raw() if isinstance(key, mldsa.MLDSA65PublicKey) else None
 
 
-def _context(ident: identity.Identity, peer_cert_pem: bytes, role: str,
-             rejected: list) -> SSL.Context:
-    pin = identity.raw_public_key(peer_cert_pem)        # ValueError unless ML-DSA-65
+def _pins(peer_cert_pem) -> frozenset:
+    """Raw ML-DSA-65 keys to accept: one PEM, several, or None (pairing client)."""
+    if peer_cert_pem is None:
+        return frozenset()
+    certs = [peer_cert_pem] if isinstance(peer_cert_pem, (bytes, bytearray)) else peer_cert_pem
+    return frozenset(identity.raw_public_key(c) for c in certs)   # ValueError unless ML-DSA-65
+
+
+def _context(ident: identity.Identity, pins: frozenset, role: str, rejected: list,
+             offer: bytes = ALPN, accept_pairing: bool = False) -> SSL.Context:
+    own = identity.raw_public_key(ident.cert_pem)
+    # Unpinned keys pass the TLS layer only where pairing is possible. A server that
+    # also accepts calls re-checks the pin after the handshake by negotiated ALPN.
+    allow_unknown = offer == PAIR_ALPN if role == "client" else accept_pairing
     ctx = SSL.Context(SSL.TLS_METHOD)
     ctx.set_min_proto_version(SSL.TLS1_3_VERSION)
     ctx.set_max_proto_version(SSL.TLS1_3_VERSION)
@@ -94,7 +109,9 @@ def _context(ident: identity.Identity, peer_cert_pem: bytes, role: str,
         # The pin replaces chain validation: only the exact pinned key at depth 0 passes,
         # so the expected self-signed error is ignored for that key and nothing else.
         try:
-            good = depth == 0 and _raw_key(cert.to_cryptography()) == pin
+            key = _raw_key(cert.to_cryptography())
+            good = (depth == 0 and key is not None and key != own
+                    and (key in pins or allow_unknown))
         except Exception:
             good = False
         if not good:
@@ -103,10 +120,11 @@ def _context(ident: identity.Identity, peer_cert_pem: bytes, role: str,
 
     ctx.set_verify(SSL.VERIFY_PEER | SSL.VERIFY_FAIL_IF_NO_PEER_CERT, verify)
     if role == "client":
-        ctx.set_alpn_protos([ALPN])
+        ctx.set_alpn_protos([offer])
     else:
-        ctx.set_alpn_select_callback(
-            lambda conn, offered: ALPN if ALPN in offered else SSL.NO_OVERLAPPING_PROTOCOLS)
+        allowed = (ALPN, PAIR_ALPN) if accept_pairing else (ALPN,)
+        ctx.set_alpn_select_callback(lambda conn, offered: next(
+            (p for p in allowed if p in offered), SSL.NO_OVERLAPPING_PROTOCOLS))
     return ctx
 
 
@@ -126,17 +144,30 @@ class SecureChannel:
         self._keys = None
         self._keys_lock = threading.Lock()   # separate from _lock: never waits behind a send
         self.group = self.cipher = self.protocol = self.peer_fingerprint = ""
+        self.mode = "call"             # "call" (ALPN hpqv/2) or "pair" (hpqv-pair/1)
+        self.peer_cert_pem = b""
+        self.local_cert_pem = b""
         self.handshake_ms = 0.0
         self.handshake_bytes = 0
 
     # -- establish ----------------------------------------------------------------
 
     @classmethod
-    def establish(cls, sock, role, ident: identity.Identity, peer_cert_pem: bytes,
-                  timeout: float = HANDSHAKE_TIMEOUT) -> "SecureChannel":
+    def establish(cls, sock, role, ident: identity.Identity, peer_cert_pem,
+                  timeout: float = HANDSHAKE_TIMEOUT, *, mode: str = "call",
+                  accept_pairing: bool = False) -> "SecureChannel":
+        """peer_cert_pem: the pinned peer certificate (PEM), a list of them (a listener
+        with several friends), or None for a pairing client. mode="pair" (client) offers
+        only PAIR_ALPN; accept_pairing (server) also accepts PAIR_ALPN from any ML-DSA-65
+        key except our own. The negotiated mode is in .mode; only "call" has voice keys."""
         if role not in ("client", "server"):
             raise ValueError(f"role must be 'client' or 'server', not {role!r}")
-        if identity.raw_public_key(peer_cert_pem) == identity.raw_public_key(ident.cert_pem):
+        if mode not in ("call", "pair") or (role == "server" and mode != "call"):
+            raise ValueError("mode is chosen by the client; a server passes accept_pairing")
+        pins = _pins(peer_cert_pem)
+        if role == "client" and mode == "call" and not pins:
+            raise ValueError("a call needs the pinned peer certificate")
+        if identity.raw_public_key(ident.cert_pem) in pins:
             # Pinning our own key means both machines share one identity: either could
             # then impersonate the other, which is the v1 shared-file hole (F1).
             sock.close()
@@ -144,14 +175,16 @@ class SecureChannel:
         t0 = time.perf_counter()
         deadline = time.monotonic() + timeout
         rejected: list = []
-        conn = SSL.Connection(_context(ident, peer_cert_pem, role, rejected), None)
+        offer = PAIR_ALPN if mode == "pair" else ALPN
+        conn = SSL.Connection(_context(ident, pins, role, rejected, offer, accept_pairing), None)
         conn.set_connect_state() if role == "client" else conn.set_accept_state()
         ch = cls(sock, conn, role)
+        ch.local_cert_pem = ident.cert_pem
         sock.settimeout(timeout)
         try:
             try:
                 ch._handshake(deadline, rejected)
-                ch._check_negotiated(peer_cert_pem)
+                ch._check_negotiated(ident, pins, offer, accept_pairing)
                 if role == "server":
                     ch._send_frame(bytes([MSG_READY, 0, 0]))
                 else:
@@ -166,20 +199,21 @@ class SecureChannel:
             ch._abort()
             raise
         sock.settimeout(SEND_TIMEOUT)
-        c2s = conn.export_keying_material(_LABEL_C2S, 32, b"")
-        s2c = conn.export_keying_material(_LABEL_S2C, 32, b"")
-        send, recv = (c2s, s2c) if role == "client" else (s2c, c2s)
-        ch._keys = MediaKeys(send_secret=send, recv_secret=recv,
-                             session_id=conn.export_keying_material(_LABEL_SESSION_ID, 4, b""))
+        if ch.mode == "call":                   # a pairing channel never gets voice keys
+            c2s = conn.export_keying_material(_LABEL_C2S, 32, b"")
+            s2c = conn.export_keying_material(_LABEL_S2C, 32, b"")
+            send, recv = (c2s, s2c) if role == "client" else (s2c, c2s)
+            ch._keys = MediaKeys(send_secret=send, recv_secret=recv,
+                                 session_id=conn.export_keying_material(_LABEL_SESSION_ID, 4, b""))
         ch._sas = conn.export_keying_material(_LABEL_SAS, 4, b"").hex()
         ch.group = conn.get_group_name()
         ch.cipher = conn.get_cipher_name()
         ch.protocol = conn.get_protocol_version_name()
-        ch.peer_fingerprint = identity.fingerprint(peer_cert_pem)
+        ch.peer_fingerprint = identity.fingerprint(ch.peer_cert_pem)
         ch.handshake_ms = (time.perf_counter() - t0) * 1000
         ch.handshake_bytes = ch._nbytes
         log.info("secure channel established", extra={
-            "role": role, "group": ch.group, "cipher": ch.cipher, "protocol": ch.protocol,
+            "role": role, "mode": ch.mode, "group": ch.group, "cipher": ch.cipher, "protocol": ch.protocol,
             "handshake_ms": round(ch.handshake_ms, 2), "handshake_bytes": ch.handshake_bytes,
             "peer_fingerprint": ch.peer_fingerprint})
         return ch
@@ -210,17 +244,27 @@ class SecureChannel:
             first = False
             self._conn.bio_write(data)
 
-    def _check_negotiated(self, peer_cert_pem: bytes) -> None:
+    def _check_negotiated(self, ident, pins: frozenset, offer: bytes,
+                          accept_pairing: bool) -> None:
         conn = self._conn
         if conn.get_protocol_version_name() != PROTOCOL:
             raise HandshakeError("tls_error", f"negotiated {conn.get_protocol_version_name()}")
         if conn.get_group_name() != GROUP:
             raise HandshakeError("wrong_group", f"negotiated {conn.get_group_name()}")
-        if conn.get_alpn_proto_negotiated() != ALPN:
-            raise HandshakeError("alpn_mismatch", "peer did not agree on hpqv/2")
+        alpn = conn.get_alpn_proto_negotiated()
+        allowed = (offer,) if self.role == "client" else \
+            ((ALPN, PAIR_ALPN) if accept_pairing else (ALPN,))
+        if alpn not in allowed:
+            raise HandshakeError("alpn_mismatch", f"peer did not agree on {offer.decode()}")
         peer = conn.get_peer_certificate(as_cryptography=True)
-        if peer is None or _raw_key(peer) != identity.raw_public_key(peer_cert_pem):
+        key = None if peer is None else _raw_key(peer)
+        if key is None or key == identity.raw_public_key(ident.cert_pem):
+            raise HandshakeError("bad_peer_cert", "peer key is missing or our own")
+        # Calls always need a pinned key, even on a server that accepts pairing.
+        if alpn == ALPN and key not in pins:
             raise HandshakeError("bad_peer_cert", "peer key is not the pinned key")
+        self.mode = "call" if alpn == ALPN else "pair"
+        self.peer_cert_pem = peer.public_bytes(serialization.Encoding.PEM)
 
     def _await_ready(self, deadline: float) -> None:
         # A TLS 1.3 client finishes before the server has checked the client cert;
@@ -361,11 +405,19 @@ class SecureChannel:
         A second Keyring on the same secrets would restart seq at 0 and reuse
         (key, nonce) pairs, so later calls raise instead of returning a copy.
         """
+        if self.mode != "call":
+            raise RuntimeError("a pairing channel carries no voice keys")
         with self._keys_lock:
             keys, self._keys = self._keys, None
         if keys is None:
             raise RuntimeError("media keys already taken for this channel")
         return keys
+
+    def channel_binding(self) -> bytes:
+        """RFC 9266 tls-exporter channel binding: 32 B, equal on both ends of this
+        connection only. Used by pairing to bind its code to this TLS session."""
+        with self._lock:
+            return self._conn.export_keying_material(_LABEL_CB, 32, b"")
 
     def sas(self) -> str:
         return self._sas

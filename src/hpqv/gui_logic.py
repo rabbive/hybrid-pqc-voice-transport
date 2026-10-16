@@ -165,6 +165,19 @@ def validate_wav(path) -> "str | None":
     return None
 
 
+def pairing_prompt(code: str, label: str, fingerprint: str, key_changed: bool) -> tuple:
+    """(title, body) for the code-comparison dialog (B2)."""
+    body = (f"Pairing code:\n\n        {code}\n\n"
+            f"Other device: {label}\n({fingerprint[-19:]})\n\n"
+            "Read the code aloud with the other person. Press Yes only if their "
+            "screen shows exactly the same six digits.")
+    if key_changed:
+        body = (f"WARNING: you already have a friend called {label!r} with a different "
+                "key. Only continue if they really reinstalled or changed computer.\n\n"
+                + body)
+    return "Do the codes match?", body
+
+
 def end_text(hung_up: bool, peer_ended: bool, connection_lost: bool = False,
              protocol_error: bool = False) -> str:
     """State-label text once the call is over. It claims "by peer" only for an

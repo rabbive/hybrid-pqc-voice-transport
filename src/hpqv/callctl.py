@@ -33,6 +33,8 @@ class CallHandle:
         self.protocol_error = False   # the peer sent something it must not
 
     def start(self, channel, stats, stop_event) -> Keyring:
+        if getattr(channel, "mode", "call") != "call":
+            raise RuntimeError("a pairing channel cannot carry a call")
         self._channel, self._stats, self._stop = channel, stats, stop_event
         self._ring = Keyring(channel.media_keys())
         if self._early_hang_up:

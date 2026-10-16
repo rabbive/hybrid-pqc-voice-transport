@@ -25,11 +25,12 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from hpqv import control, demo
+from hpqv import control, demo, pairflow, pairing, paths
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
 from hpqv.gui_graph import GraphCanvas, SERIES
-from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_wav)
+from hpqv.gui_logic import (CallClock, end_text, pairing_prompt, snapshot_for_export,
+                            validate_wav)
 from hpqv.gui_network import NetworkPanel
 from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
                              StatsPanel)
@@ -106,6 +107,7 @@ class DemoWindow:
         self.conn = ConnectionPanel(call_tab, self._create_identity)
         self.info = demo.handshake_info()
         self.handshake_panel = HandshakePanel(call_tab, self.info)
+        self._build_pairing(call_tab)
         self.network = NetworkPanel(net_tab, self.controls)
         self.security = SecurityPanel(sec_tab, self._rotate, self.info)
 
@@ -120,6 +122,81 @@ class DemoWindow:
         self.graph.pack(fill="both", expand=True, padx=4, pady=4)
         self.export_label = ttk.Label(right, text="", wraplength=640, justify="left")
         self.export_label.pack(fill="x", padx=6, pady=(0, 4))
+
+    # ---------------- pairing (B2) ----------------
+
+    def _build_pairing(self, parent):
+        box = ttk.LabelFrame(parent, text="Pair a device (no files)")
+        box.pack(fill="x", padx=6, pady=4)
+        self.pair_allow_btn = ttk.Button(box, text="Allow new device (2 min)",
+                                         command=self._allow_pairing)
+        self.pair_allow_btn.grid(row=0, column=0, columnspan=2, sticky="w", pady=2)
+        self.pair_target = tk.StringVar(value="192.168.1.42:9000")
+        ttk.Entry(box, textvariable=self.pair_target, width=22).grid(row=1, column=0, sticky="w")
+        self.pair_btn = ttk.Button(box, text="Pair with…", command=self._pair_with)
+        self.pair_btn.grid(row=1, column=1, sticky="w", padx=4)
+        self.pair_status = ttk.Label(box, text="Leave the identity files empty to call "
+                                                "paired devices.", wraplength=300)
+        self.pair_status.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+    def _pairing_busy(self) -> bool:
+        busy = (self.worker and self.worker.is_alive()) or \
+               (getattr(self, "_pair_thread", None) and self._pair_thread.is_alive())
+        if busy:
+            self.events.put(("pair", "Finish or hang up the current call or pairing first."))
+        return bool(busy)
+
+    def _allow_pairing(self):
+        if self._pairing_busy():
+            return
+        port = int(self.conn.port.get())          # Tk variables: read on the main thread
+
+        def work():
+            try:
+                res = pairflow.allow_pairing(port, pairing.WINDOW_SECONDS, ask=self._ask_user,
+                                             on_event=lambda m: self.events.put(("pair", m)))
+                self.events.put(("pair", f"Paired with {res.friend.label}." if res else
+                                 "No device paired."))
+            except Exception as e:
+                self.events.put(("pair", f"Pairing failed: {e}"))
+        self._pair_thread = threading.Thread(target=work, daemon=True)
+        self._pair_thread.start()
+
+    def _pair_with(self):
+        if self._pairing_busy():
+            return
+        target = self.pair_target.get()
+
+        def work():
+            try:
+                self.events.put(("pair", f"Connecting to {target}…"))
+                host, port = pairflow.resolve(target, paths.device_identity(), pairing_only=True)
+                res = pairflow.connect_and_pair(host, port, ask=self._ask_user)
+                self.events.put(("pair", f"Paired with {res.friend.label}."))
+            except pairing.PairingFailed as e:
+                self.events.put(("pair", "Pairing failed: " + pairflow.FAILURE_TEXT[e.reason]))
+            except HandshakeError:
+                self.events.put(("pair", "Pairing refused: the other device has no pairing "
+                                         "window open, is busy, or is this device."))
+            except Exception as e:
+                self.events.put(("pair", f"Pairing failed: {e}"))
+        self._pair_thread = threading.Thread(target=work, daemon=True)
+        self._pair_thread.start()
+
+    def _ask_user(self, code, label, fingerprint, key_changed, cancel) -> bool:
+        """Called on a pairing worker thread: show the dialog on the Tk thread, wait."""
+        answered, box = threading.Event(), {}
+        title, body = pairing_prompt(code, label, fingerprint, key_changed)
+
+        def show():
+            box["ok"] = messagebox.askyesno(title, body)
+            answered.set()
+        self.root.after(0, show)
+        deadline = time.monotonic() + pairing.DECISION_TIMEOUT
+        while not answered.wait(0.1):
+            if cancel.is_set() or time.monotonic() > deadline:
+                return False      # ponytail: the dialog stays open; its answer is ignored
+        return box.get("ok", False) and not cancel.is_set()
 
     # ---------------- identity ----------------
 
@@ -252,7 +329,13 @@ class DemoWindow:
         put = self.events.put
         try:
             args = self._args(cfg)
-            ident, peer_cert = demo._load_identity(args.key, args.cert, args.peer_cert)
+            if cfg.get("friends"):
+                ident, peer_cert = paths.device_identity(), pairflow.store().trusted_certs()
+                if not peer_cert:
+                    put(("state", "no paired devices yet: use Pair a device first"))
+                    return
+            else:
+                ident, peer_cert = demo._load_identity(args.key, args.cert, args.peer_cert)
             if cfg["mode"] == "listen":
                 put(("state", f"listening on {cfg['port']}…"))
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -336,6 +419,8 @@ class DemoWindow:
                 return
             if kind == "state":
                 self.state_label.config(text=value)
+            elif kind == "pair":
+                self.pair_status.config(text=value)
             elif kind == "connected":
                 self._live = True
                 self._cc.start()

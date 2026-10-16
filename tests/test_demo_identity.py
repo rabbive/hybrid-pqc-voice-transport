@@ -118,13 +118,19 @@ def test_a_private_key_as_peer_cert_is_refused(tmp_path):
 
 
 @pytest.mark.parametrize("verb", ["listen", "call"])
-def test_listen_and_call_require_the_three_identity_files(verb):
-    argv = [verb, "--port", "0"] if verb == "listen" else [verb, "127.0.0.1:1"]
+def test_identity_files_go_together_or_friend_mode_is_used(verb, tmp_path, monkeypatch):
+    """B2: no identity files = this device's identity + paired friends; some = error."""
+    monkeypatch.setenv("HPQV_HOME", str(tmp_path))
+    argv = [verb, "--port", "0", "--no-discovery"] if verb == "listen" else [verb, "127.0.0.1:1"]
     with pytest.raises(SystemExit) as e:
-        demo.main(argv)
-    assert e.value.code == 2                       # argparse usage error
-    with pytest.raises(SystemExit):
+        demo.main(argv)                            # friend mode, but nobody paired yet
+    assert "no paired friends yet" in str(e.value.code)
+    with pytest.raises(SystemExit) as e:
+        demo.main(argv + ["--key", "me.key"])
+    assert "go together" in str(e.value.code)
+    with pytest.raises(SystemExit) as e:
         demo.main(argv + ["--identity-file", "identity.json"])
+    assert e.value.code == 2                       # the v1 flag no longer exists
 
 
 # ---------------- the listener waits for CALL_START ----------------

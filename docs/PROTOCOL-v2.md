@@ -147,6 +147,39 @@ been re-measured.
   `LegacyIdentityError` and the user is told to generate v2 identities. It is
   never converted, because the secret of the other peer would carry over.
 
+### 4a. No-files pairing (B2, experimental)
+
+Instead of exchanging certificate files, two devices on the same Wi-Fi can
+pair. The design and its limitations are in
+[reviews/2026-10-16-b2-pairing-design.md](reviews/2026-10-16-b2-pairing-design.md).
+
+- **Device identity:** each device creates its own identity in its app directory
+  (`hpqv.paths`; `HPQV_HOME` overrides it).
+- **The pairing exchange:**
+  - it runs on a **separate ALPN, `hpqv-pair/1`**;
+  - the listener accepts it only while the user has opened a 2-minute window,
+    one pairing at a time, at most 3 attempts;
+  - it is a commit-then-reveal exchange that derives a 6-digit code from the RFC
+    9266 channel binding, both fingerprints and both nonces (`hpqv.pairing`);
+  - both users must press "Codes match".
+- **Saving:** the friend is stored (`hpqv.trust`, keyed by fingerprint, written
+  atomically, owner-only) only after the local yes **and** the peer's
+  `CONFIRM = 1`.
+- **Separation from calls:** a pairing channel has no voice keys, and the call
+  setup refuses it. Calls then use the unchanged `hpqv/2` path, pinned to the
+  stored friends.
+- **Discovery** (`hpqv.discovery`) is a UDP broadcast of hints. It is never
+  trusted.
+- **CLI:** `python -m hpqv.demo pair --allow` on one device and `pair
+  <device|HOST:PORT>` on the other; then `listen` / `call <friend|HOST:PORT>`
+  with no identity flags. `peers` and `forget` manage friends. The file-based
+  flags still work as before.
+- **GUI:** leaving the three identity fields empty uses this device's identity
+  and paired friends; the "Pair a device" box runs pairing.
+- **Experimental:** this is our own application of the Bluetooth/ZRTP
+  commit-then-reveal pattern. It is not formally verified or externally
+  reviewed.
+
 ## 5. Key derivation
 
 All media secrets come from the TLS exporter (RFC 8446 section 7.5), so they

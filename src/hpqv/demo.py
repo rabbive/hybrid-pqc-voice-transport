@@ -1,6 +1,7 @@
 """Live two-peer voice demo: v2 TLS 1.3 control channel + real-time UDP voice, mic/speaker or file I/O."""
 import argparse
 import logging
+import os
 import socket
 import struct
 import sys
@@ -567,12 +568,16 @@ def establish_timed(role, sock, ident, peer_cert_pem, stats) -> SecureChannel:
     (shared by CLI and GUI). `role` is "client" (caller) or "server" (listener).
     Raises secure.HandshakeError."""
     channel = SecureChannel.establish(sock, role, ident, peer_cert_pem)
+    record_handshake(channel, stats)
+    return channel
+
+
+def record_handshake(channel, stats) -> None:
     with stats.lock:
         stats.handshake_ms = channel.handshake_ms
         stats.handshake_bytes = channel.handshake_bytes
         stats.group, stats.cipher = channel.group, channel.cipher
         stats.peer_fingerprint, stats.sas = channel.peer_fingerprint, channel.sas()
-    return channel
 
 
 def handshake_info() -> dict:
@@ -679,6 +684,188 @@ def call(args):
                 closer.close()
 
 
+def _uses_files(args) -> bool:
+    given = [bool(getattr(args, k, None)) for k in ("key", "cert", "peer_cert")]
+    if any(given) and not all(given):
+        sys.exit("--key, --cert and --peer-cert go together (or omit all three to use "
+                 "this device's identity and paired friends)")
+    return all(given)
+
+
+def _friend_store_or_exit():
+    from hpqv import pairflow
+    from hpqv.trust import TrustStoreError
+    try:
+        st = pairflow.store()
+        st.friends()
+        return st
+    except TrustStoreError as e:
+        sys.exit(str(e))
+
+
+def listen_friends(args):
+    """Listen with this device's identity; only paired friends may call (B2)."""
+    from hpqv import discovery, identity as ident_mod, paths
+    from hpqv.listener import Listener
+    ident, st = paths.device_identity(), _friend_store_or_exit()
+    if not st.friends():
+        sys.exit("no paired friends yet: run `python -m hpqv.demo pair --allow` here and "
+                 "`python -m hpqv.demo pair <this device>` on the other one")
+    finished = threading.Event()
+
+    def on_call(channel, addr):
+        stats = Stats()
+        record_handshake(channel, stats)
+        friend = st.get(channel.peer_fingerprint)
+        print(f"call from {friend.label if friend else '?'} at {addr[0]} "
+              f"({stats.handshake_ms:.1f} ms, {stats.handshake_bytes} B, {stats.group}); "
+              f"code {stats.sas}")
+        udp_sock = _open_bound_udp(lst.port)
+        try:
+            peer_udp = wait_call_start(channel, addr[0])
+            _run_call(channel, udp_sock, peer_udp, args, stats=stats)
+        except (CallSetupError, ConnectionError) as e:
+            print(f"call not started: {e}")
+        finally:
+            udp_sock.close()
+            finished.set()
+
+    lst = Listener(ident, args.port, trusted=st.trusted_certs, on_call=on_call)
+    disc = None
+    if not args.no_discovery:
+        disc = discovery.Discovery(lst_name(ident), lst.port,
+                                   ident_mod.fingerprint(ident.cert_pem))
+        disc.start()
+    lst.start()
+    print(f"listening on port {lst.port} for {len(st.friends())} paired friend(s)", flush=True)
+    try:
+        while not finished.wait(0.25):
+            pass
+    finally:
+        lst.stop()
+        if disc is not None:
+            disc.stop()
+
+
+def call_friend(args):
+    """Call a paired friend by name / fingerprint prefix (via discovery) or HOST:PORT."""
+    from hpqv import pairflow, paths
+    ident, st = paths.device_identity(), _friend_store_or_exit()
+    target = args.target
+    if ":" in target and target.rsplit(":", 1)[1].isdigit():
+        pins = st.trusted_certs()               # any of my friends may answer at that address
+        if not pins:
+            sys.exit("no paired friends yet: pair first")
+        host, port = target.rsplit(":", 1)
+        port = int(port)
+    else:
+        matches = st.find(target)
+        if len(matches) != 1:
+            sys.exit(f"{len(matches)} paired friends match {target!r}; run `peers`")
+        pins = [matches[0].cert_pem]
+        try:
+            host, port = pairflow.resolve(matches[0].fingerprint, ident, pairing_only=False)
+        except LookupError:
+            sys.exit(f"{matches[0].label} is not visible on this network; "
+                     "ask for their HOST:PORT and call that")
+    sock_tcp = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    stats = Stats()
+    channel = udp_sock = None
+    try:
+        try:
+            channel = SecureChannel.establish(sock_tcp, "client", ident, pins)
+        except HandshakeError as e:
+            _fail("handshake failed", handshake_failure_text(e.reason) +
+                  (" (if you paired recently, the other device may not have saved the "
+                   "pairing: pair again)" if e.reason in ("not_ready", "peer_closed") else ""))
+        record_handshake(channel, stats)
+        friend = st.get(channel.peer_fingerprint)
+        print(f"connected to {friend.label if friend else '?'} ({stats.group}); code {stats.sas}")
+        udp_sock = _open_bound_udp(0)
+        channel.send(control.MSG_CALL_START, struct.pack(">H", udp_sock.getsockname()[1]))
+        _run_call(channel, udp_sock, (host, port), args, stats=stats)
+    finally:
+        for closer in (channel, udp_sock, sock_tcp):
+            if closer is not None:
+                closer.close()
+
+
+def lst_name(ident) -> str:
+    from hpqv.trust import _label
+    return _label(ident.cert_pem)
+
+
+def pair_cmd(args):
+    """Run the pairing command, then end the process without interpreter teardown.
+
+    The console prompt (pairflow.ask_console) reads stdin on a worker thread; if the
+    other side cancels first, that thread may still be blocked in input(), and normal
+    shutdown then aborts on the stdin lock. ponytail: os._exit is the simple fix; a
+    non-blocking console reader would be the upgrade.
+    """
+    code = 0
+    try:
+        _pair_cmd(args)
+    except SystemExit as e:
+        code = e.code if isinstance(e.code, int) else (print(e.code) or 1)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
+def _pair_cmd(args):
+    from hpqv import pairflow, paths
+    from hpqv.pairing import PairingFailed
+    if args.allow:
+        result = pairflow.allow_pairing(args.port, args.seconds, announce=not args.no_discovery)
+        if result is None:
+            sys.exit(1)
+        print(f"paired with {result.friend.label} ({result.friend.fingerprint[-19:]})")
+        return
+    if not args.target:
+        sys.exit("give the other device (name or HOST:PORT), or --allow on the other side")
+    try:
+        host, port = pairflow.resolve(args.target, paths.device_identity(), pairing_only=True)
+        result = pairflow.connect_and_pair(host, port)
+    except LookupError as e:
+        sys.exit(str(e))
+    except HandshakeError as e:
+        sys.exit("pairing refused: the other device has no pairing window open, is busy, "
+                 f"or rejected this device ({e.reason})")
+    except PairingFailed as e:
+        sys.exit("pairing failed: " + pairflow.FAILURE_TEXT[e.reason])
+    print(f"paired with {result.friend.label} ({result.friend.fingerprint[-19:]})")
+
+
+def peers_cmd(args):
+    from hpqv import pairflow, paths
+    st = _friend_store_or_exit()
+    ident = paths.device_identity()
+    print(f"this device: {lst_name(ident)} ({identity.fingerprint(ident.cert_pem)[-19:]})")
+    print("paired friends:" if st.friends() else "paired friends: none")
+    for f in st.friends():
+        print(f"  {f.label:<20} {f.fingerprint[-19:]}  paired {f.paired_at}")
+    if args.no_discovery:
+        return
+    known = {f.fingerprint.replace(" ", "")[:16] for f in st.friends()}
+    nearby = pairflow.scan(ident)
+    print("nearby (unverified until you connect):" if nearby else "nearby: none heard")
+    for s in nearby:
+        tag = "paired" if s.fp_hint in known else (
+            "key changed?" if st.by_label(s.name) else "new")
+        print(f"  {s.name:<20} {s.address}:{s.tcp_port}  {tag}"
+              f"{'  [pairing open]' if s.pairing else ''}")
+
+
+def forget_cmd(args):
+    st = _friend_store_or_exit()
+    hits = st.find(args.friend)
+    if len(hits) != 1:
+        sys.exit(f"{len(hits)} paired friends match {args.friend!r}; use a longer fingerprint prefix")
+    st.remove(hits[0].fingerprint)
+    print(f"removed {hits[0].label} ({hits[0].fingerprint[-19:]})")
+
+
 def _open_bound_udp(port):
     from hpqv.udp import open_udp
     return open_udp(("0.0.0.0", port))
@@ -726,15 +913,34 @@ def main(argv=None):
     p_keygen.add_argument("--cert-out", required=True, help="certificate file to give the peer")
     p_keygen.set_defaults(func=keygen)
 
-    p_listen = sub.add_parser("listen", help="wait for an incoming call")
+    p_listen = sub.add_parser("listen", help="wait for an incoming call (paired friends, "
+                                            "or the peer given with --peer-cert)")
     p_listen.add_argument("--port", type=int, required=True)
-    _add_common_call_args(p_listen, identity_required=True)
-    p_listen.set_defaults(func=listen)
+    p_listen.add_argument("--no-discovery", action="store_true")
+    _add_common_call_args(p_listen)
+    p_listen.set_defaults(func=lambda a: listen(a) if _uses_files(a) else listen_friends(a))
 
-    p_call = sub.add_parser("call", help="place a call to HOST:PORT")
-    p_call.add_argument("target", metavar="HOST:PORT")
-    _add_common_call_args(p_call, identity_required=True)
-    p_call.set_defaults(func=call)
+    p_call = sub.add_parser("call", help="call a paired friend (name) or HOST:PORT")
+    p_call.add_argument("target", metavar="FRIEND|HOST:PORT")
+    _add_common_call_args(p_call)
+    p_call.set_defaults(func=lambda a: call(a) if _uses_files(a) else call_friend(a))
+
+    p_pair = sub.add_parser("pair", help="pair with a nearby device (no files needed)")
+    p_pair.add_argument("target", nargs="?", metavar="DEVICE|HOST:PORT")
+    p_pair.add_argument("--allow", action="store_true",
+                        help="open a pairing window on this device instead")
+    p_pair.add_argument("--port", type=int, default=9000)
+    p_pair.add_argument("--seconds", type=float, default=120.0)
+    p_pair.add_argument("--no-discovery", action="store_true")
+    p_pair.set_defaults(func=pair_cmd)
+
+    p_peers = sub.add_parser("peers", help="list paired friends and nearby devices")
+    p_peers.add_argument("--no-discovery", action="store_true")
+    p_peers.set_defaults(func=peers_cmd)
+
+    p_forget = sub.add_parser("forget", help="remove a paired friend")
+    p_forget.add_argument("friend", metavar="NAME|FINGERPRINT-PREFIX")
+    p_forget.set_defaults(func=forget_cmd)
 
     args = parser.parse_args(argv)
 

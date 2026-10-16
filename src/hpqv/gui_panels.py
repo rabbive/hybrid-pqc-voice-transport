@@ -123,9 +123,12 @@ class ConnectionPanel:
                "peer_cert": self.peer_cert.get(), "input": self.source.get(),
                "wav": self.wav.get() or None,
                "record_wav": (self.record_path.get() or None) if self.record.get() else None}
-        if not (cfg["key"] and cfg["cert"] and cfg["peer_cert"]):
+        given = [bool(cfg[k]) for k in ("key", "cert", "peer_cert")]
+        if any(given) and not all(given):
             raise ValueError("Choose your key, your certificate and the peer's certificate, "
-                             "or press Create identity.")
+                             "or leave all three empty to use this computer's identity "
+                             "and the devices paired below.")
+        cfg["friends"] = not any(given)
         if cfg["input"] == "file" and not cfg["wav"]:
             raise ValueError("Choose a WAV file, or switch the input to Microphone.")
         return cfg
