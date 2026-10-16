@@ -416,10 +416,23 @@ counted separately (`skipped`) and appear in the export, not as loss.
 
 The design calls for scripted headless loopback calls through the real pipeline (WAV input,
 real encoder, keyring, impairment, jitter buffer, playout) covering clean calls, random loss
-under each repair mode, burst loss, and delay/jitter against jitter depth. Method, results and
-caveats are in **`docs/EXPERIMENT-live-scenarios.md`** (data in `results/live_scenarios.csv`).
-This report deliberately does not restate those figures: read them there, with that document's
-caveats, not here.
+under each repair mode, burst loss, and delay/jitter against jitter depth.
+Method, full results and caveats are in **`docs/EXPERIMENT-live-scenarios.md`** (data in
+`results/live_scenarios.csv`, every run in `results/live_scenarios_runs.csv`). Headline figures,
+means over three seeds of 10-second loopback calls (macOS, 2026-10-16):
+
+| Scenario | Residual loss: silence / PLC / FEC | MOS estimate (FEC) |
+|---|---|---|
+| Random 10 % loss | 9.81 % / 9.81 % / **6.74 %** | 3.48 (silence 3.13) |
+| Random 20 % loss | 18.96 % / 18.96 % / **13.02 %** | 2.83 (silence 2.39) |
+| Burst 10 %, mean burst 3 | — / 10.73 % / **9.47 %** | 3.26 (PLC 3.13) |
+| Delay 100 ± 30 ms, jitter depth 2 vs 6 | 2.00 % (16.7 late) vs 0 % (0 late) | 4.06 vs 4.26 |
+
+FEC recovered about a third of lost frames under random loss and an eighth under burst loss:
+on this synthetic speech-like signal only 42 % of packets carried LBRR, and only the last frame
+of a burst can be rebuilt. Silence and PLC leave identical residual loss because neither
+restores audio. Loopback only, synthetic signal, MOS is an E-model estimate and SNR is a
+waveform measure, not a listening score; see that document's "does not support" list.
 
 ---
 

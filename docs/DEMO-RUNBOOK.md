@@ -7,9 +7,9 @@ two-device setup details see [DESKTOP-DEMO.md](DESKTOP-DEMO.md); for CLI use see
 
 **Status of this script.** The behaviours below follow from the code, the unit tests and the
 committed experiments. No two-laptop run is recorded in the repo, so **rehearse it once end to
-end** and correct anything your machines do differently. No figure from the live scenarios
-experiment is quoted here; read [EXPERIMENT-live-scenarios.md](EXPERIMENT-live-scenarios.md)
-for those.
+end** and correct anything your machines do differently. For citable numbers behind what the
+audience sees (FEC vs silence vs PLC, burst loss, jitter depth), point to
+[EXPERIMENT-live-scenarios.md](EXPERIMENT-live-scenarios.md) and `docs/EVALUATION-REPORT.md` §11.
 
 ---
 

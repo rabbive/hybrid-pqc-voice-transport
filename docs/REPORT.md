@@ -403,8 +403,12 @@ screen. See `docs/EVALUATION-REPORT.md` §10.
 ### J. Live-pipeline scenarios
 
 Scripted loopback calls through the real pipeline across loss, repair mode, burst loss and
-delay/jitter are reported in `docs/EXPERIMENT-live-scenarios.md` (to be added by the integrator;
-figures are not restated here).
+delay/jitter are reported in `docs/EXPERIMENT-live-scenarios.md`. Means over three seeds:
+FEC lowered residual loss from 9.81 % to 6.74 % at 10 % random loss and from 18.96 % to 13.02 % at
+20 %, and from 10.73 % (PLC) to 9.47 % under 10 % burst loss; silence and PLC leave the same
+residual loss. At 100 ± 30 ms delay a depth-2 jitter buffer saw 16.7 late frames per 500, depth 6
+none. Loopback calls on a synthetic speech-like signal; MOS is an E-model estimate. Summary table
+in `docs/EVALUATION-REPORT.md` §11.
 
 ---
 
