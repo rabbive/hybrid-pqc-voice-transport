@@ -165,3 +165,29 @@ The main voice benchmark sends frames without real-time pacing and does not meas
 
 > The core architecture has stayed the same since Review 2: reliable TCP setup and small UDP voice packets. What changed is that we now have the actual cryptographic exchange, encrypted Opus audio, a GUI demonstration, and saved experiments. We simplified MTU handling to a fixed 1200-byte limit and expanded evaluation beyond NS-3 to real sockets with controlled impairment. Our strongest current evidence is the fragmentation measurement and the reliability of TCP delivery for handshake-sized payloads. Live FEC recovery, complete setup timing, and broader network validation are the next steps.
 
+
+## 7. After this document: protocol v2 and Review III demo features
+
+Sections 1–6 describe protocol v1 (release v0.1.0-demo.1). Branch
+`feat/secure-session-v2` replaces it; v2 does not interoperate with v1.
+
+- **Classical + post-quantum key exchange.** The control channel is TLS 1.3 with
+  X25519MLKEM768, and the connection closes if any other group is negotiated.
+  This supersedes section 2's "hybrid means TCP plus UDP": v2 is also a hybrid
+  key exchange. See [PROTOCOL-v2](PROTOCOL-v2.md) and [ADR-0005](adr/0005-protocol-v2-tls13.md).
+- **Authenticated control channel and separate identities.** Each peer has its own
+  ML-DSA-65 key and certificate and pins the other's; CALL_START, KEY_ROTATE and
+  CALL_END travel inside TLS, so they cannot be injected or rewritten on the path.
+- **No-files pairing (experimental).** On the same Wi-Fi the app creates each
+  device's identity itself. The first time two devices meet, both users confirm a
+  six-digit code and each pins the other; later calls connect directly. Exchanging
+  certificate files still works as the advanced option
+  ([design](reviews/2026-10-16-b2-pairing-design.md)).
+- **Per-direction media keys and replay protection.** Voice keys come from the TLS
+  exporter, one per direction, with a 256-packet replay window
+  ([wire format](wire-format.md)).
+- **Review III demo features.** An incoming-call prompt, for every call from a
+  paired or pinned peer, that shows the caller's name, fingerprint and the call's
+  read-aloud code before answering; a *What an eavesdropper
+  sees* panel; a Wireshark dissector and [capture guide](DEMO-WIRESHARK.md); and a
+  [related-work comparison](RELATED-WORK.md).

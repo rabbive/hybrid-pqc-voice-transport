@@ -13,6 +13,49 @@ audience sees (FEC vs silence vs PLC, burst loss, jitter depth), point to
 
 ---
 
+## Review III script (v2): encrypted, authenticated, and what changed since Review II
+
+Six minutes, before the long script below. Laptop A listens, laptop B calls, and the
+narrator drives Wireshark on A (or on a third laptop on the same LAN). Both laptops run
+the `feat/secure-session-v2` build or later; v2 does not talk to the v1 release.
+
+**Setup (replaces section 1's "one identity file" step, which is v1).**
+- [ ] On both laptops, Call tab: leave *Your key*, *Your certificate* and *Peer's
+  certificate* **empty**. The app then uses this laptop's own identity, created on
+  first use in the app folder; its private key never leaves the laptop.
+- [ ] Pair the two laptops once, in the *Pair a device (no files)* box (or live as
+  step 1). Neither laptop may be in a call while pairing.
+  A: *Allow new device (2 min)*. B: type `<A's IP>:9000` and press *Pair with…*.
+  Both screens ask *Do the codes match?* with the same six-digit code. Read it aloud
+  and press **Yes** on both. Each status line then says *Paired with NAME.* The
+  pairing is remembered, so later calls between these two laptops connect directly.
+  No-files pairing is experimental ([design](reviews/2026-10-16-b2-pairing-design.md)).
+- [ ] *Advanced, file-based alternative* (still supported, e.g. if the Wi-Fi blocks
+  the pairing): Call tab → *Create identity* on each laptop. Each writes `NAME.key`
+  (stays on that laptop) and `NAME.crt`. Swap **only the `.crt` files** and choose the
+  other laptop's file as *Peer's certificate*.
+- [ ] Wireshark with the hpqv plugin installed, *Decode As* TCP 9000 → TLS set, capturing
+  on the LAN interface with filter `host <B's IP>` ([guide](DEMO-WIRESHARK.md)).
+- [ ] Rehearse once on two laptops. The automated tests cover pairing, an unpaired
+  caller being refused without a prompt, and the prompt's Decline, Hang up and Accept
+  paths. Audio after Accept and the matching codes on both screens have only been
+  checked by a person at rehearsal.
+
+| Step | Do | Say | If it fails |
+|---|---|---|---|
+| 1 | Pair the laptops (setup above), or show the status line *Paired with NAME.* if already done. | "At Review II both laptops shared one file holding both secret keys. Now each laptop makes its own key, which never leaves it. The first time two laptops meet, both people confirm a code before either trusts the other." | B says *Pairing refused*: A's 2-minute window closed or A is in a call; press *Allow new device* on A again. |
+| 2 | Start the Wireshark capture. A: *Start* (listen). B: *Start* (call). | "The handshake is standard TLS 1.3 with a hybrid classical plus post-quantum key exchange." | B shows *handshake failed: …*: read the plain-words reason; usually the laptops are not paired (file-based: the wrong peer certificate was chosen). An unpaired laptop is refused before any prompt. |
+| 3 | A's **Incoming call from NAME (paired)** prompt opens. Both read the call's code aloud: A from the prompt, B from its Security tab. A presses **Accept**. B's state changes from *ringing* to *connected — talk*. | "Pairing happened once. Every call still gets a fresh code: if anyone were in the middle, these two codes would differ. You compare them out loud before you answer." | No prompt: A is not listening on 9000, or B's firewall blocked it. No answer in 30 s declines the call; just call again. |
+| 4 | Wireshark: `tls.handshake.type == 2` → group X25519MLKEM768; `tls.app_data` → certificates encrypted; `ip.flags.mf == 1` → nothing; `hpqv` → voice packets. | "About 21 kB of handshake, never fragmented. Every voice packet is under 1200 bytes, and its payload is ciphertext." | No `HPQV` rows: plugin not loaded (*Help → About → Plugins*). |
+| 5 | A: Security tab, *What an eavesdropper sees*. In Wireshark filter `hpqv && ip.src == <A's IP>` and compare the session id, key generation and packet size with the panel (packets go out 50 a second, so the sequence number moves too fast to match live). | "This is everything on the wire. Without the session keys, the voice inside cannot be decoded." | — |
+| 6 | Press **Rotate keys**. | "New keys mid-call: the generation in the header goes from 0 to 1, and the audio does not stop." | Button says *old key retiring…*: wait 4 s and press again. |
+| 7 | Network tab: Bad Wi-Fi preset, then repair modes (section 2's 3:00–10:00). | "The Review II loss demo, now on the v2 protocol." | — |
+| 8 | Slide from [RELATED-WORK.md](RELATED-WORK.md). | "Of the four projects we compared, only ours reports measurements of how a post-quantum handshake behaves under loss. Those numbers are from our v1 protocol; v2 has not been re-measured yet." | — |
+
+Hang up on either laptop ends both. The handshake-failure wording is `demo.FAILURE_TEXT`.
+
+---
+
 ## 0. Who does what, and the one idea to get right
 
 Team of three works best: **driver A** (network laptop), **driver B** (listening laptop on the

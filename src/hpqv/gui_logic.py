@@ -4,10 +4,13 @@ Kept apart from the widgets so they are unit-testable and so there is one
 definition of every range and label shared by the sliders and the tests.
 """
 import copy
+import queue
+import time
 import wave
 from dataclasses import dataclass
 from typing import Callable
 
+from hpqv import packet
 from hpqv.audio import CHANNELS, FS
 from hpqv.controls import DEFAULTS
 from hpqv.telemetry import JITTER_FRAME_MS
@@ -133,6 +136,33 @@ def format_sas(sas: str) -> str:
     return f"{sas[:4]} {sas[4:]}" if sas else sas
 
 
+WIRE_LABELS = ("Size on the wire", "Version/type", "Session id", "Sequence",
+               "Key generation (mod 4)", "FEC hint", "Encrypted payload + tag",
+               "Payload bytes (first 32)")
+
+
+def wire_rows(dg: bytes) -> list:
+    """(label, text) pairs for one sent datagram, as an observer on the wire sees it:
+    the cleartext header fields and the first 32 bytes of ciphertext. Never plaintext."""
+    if not dg:
+        return [(label, NONE) for label in WIRE_LABELS]
+    size = ("Size on the wire", f"{len(dg)} B (cap {packet.MAX_DATAGRAM} B)")
+    try:
+        session_id, seq, flags = packet.parse_header(dg)
+    except packet.Reject:
+        return [size, ("Version/type", "not a v2 datagram")] + [
+            (label, NONE) for label in WIRE_LABELS[2:]]
+    head = dg[packet.HEADER_LEN:packet.HEADER_LEN + 32].hex(" ")
+    return [size,
+            ("Version/type", f"0x{dg[0]:02x} (v2 voice)"),
+            ("Session id", session_id.hex()),
+            ("Sequence", str(seq)),
+            ("Key generation (mod 4)", str(flags & packet.GEN_MASK)),
+            ("FEC hint", "on" if flags & packet.FLAG_FEC else "off"),
+            ("Encrypted payload + tag", f"{len(dg) - packet.HEADER_LEN} B"),
+            ("Payload bytes (first 32)", head[:47] + "\n" + head[48:])]
+
+
 def security_rows(info: dict, stats: dict, live: bool, generation: int) -> list:
     """(label, text) pairs for the security panel.
 
@@ -149,6 +179,33 @@ def security_rows(info: dict, stats: dict, live: bool, generation: int) -> list:
 
 
 # ---------------- call lifecycle ----------------
+
+def incoming_call_text(fingerprint: str, sas: str, name: str = "") -> str:
+    """Body of the incoming-call prompt: who is calling (their certificate's
+    fingerprint, and their name if they are a paired friend) and the code both
+    sides must read aloud before answering."""
+    who = f"Incoming call from {name} (paired)." if name else "Incoming call."
+    return (f"{who} The caller's certificate fingerprint is:\n\n"
+            f"{wrap_fingerprint(fingerprint)}\n\n"
+            f"Read this code aloud; the caller must see the same one:\n{format_sas(sas)}\n\n"
+            "Answer only if both match.")
+
+
+def wait_for_answer(answers, stop, timeout: float, tick: float = 0.2) -> bool:
+    """Worker side of the prompt: True only if Accept (True) arrives before `timeout`
+    and Hang up (`stop`) was not pressed. Decline, timeout and Hang up are all False."""
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            answer = answers.get(timeout=min(tick, remaining))
+        except queue.Empty:
+            continue
+        return bool(answer) and not stop.is_set()
+    return False
+
 
 def validate_wav(path) -> "str | None":
     """Why `path` cannot be a call input, or None. Mirrors demo.FrameSource's checks."""
