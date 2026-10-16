@@ -70,7 +70,7 @@ def _cmd(*args) -> str:
         return ""
 
 
-def meta(n: int, load_before: tuple) -> dict:
+def meta(n: int) -> dict:
     return {
         "date_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
         "command": " ".join(["python", "scripts/run_handshake_bench.py", *sys.argv[1:]]),
@@ -82,7 +82,7 @@ def meta(n: int, load_before: tuple) -> dict:
                  "drift hits both modes alike. Hybrid rows run in this process after one "
                  "discarded warm-up; each classical row runs in a fresh child process after "
                  "one discarded warm-up in that child",
-        "load_average_1_5_15": {"before": load_before, "after": os.getloadavg()},
+        "load_average_1_5_15": {"before": os.getloadavg()},
         "machine": {"cpu": _cmd("sysctl", "-n", "machdep.cpu.brand_string") or platform.processor(),
                     "cores": os.cpu_count(), "macos": platform.mac_ver()[0],
                     "arch": platform.machine(),
@@ -109,13 +109,14 @@ def main(argv=None) -> int:
     if not 1 <= a.n <= classical_baseline.MAX_N:
         p.error(f"--n must be 1..{classical_baseline.MAX_N}")
 
-    load_before = os.getloadavg()
+    info = meta(a.n)                # before any output exists, so git_dirty means source
     hybrid_once()                   # warm-up, discarded (classical_baseline.run does its own)
     rows = []
     for _ in range(a.n):
         rows += [hybrid_once(), *classical_baseline.run(1)]
     for r in rows:
         r["handshake_ms"], r["cpu_ms"] = round(r["handshake_ms"], 3), round(r["cpu_ms"], 3)
+    info["load_average_1_5_15"]["after"] = os.getloadavg()
     summary = summarize(rows)
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "handshake_bench.csv"), "w", newline="") as f:
@@ -123,7 +124,7 @@ def main(argv=None) -> int:
         w.writeheader()
         w.writerows(rows)
     with open(os.path.join(out, "handshake_bench.json"), "w") as f:
-        json.dump({"meta": meta(a.n, load_before), "summary": summary, "rows": rows}, f, indent=2)
+        json.dump({"meta": info, "summary": summary, "rows": rows}, f, indent=2)
         f.write("\n")
     for mode, s in summary.items():
         print(f"{mode:>24}: median {s['handshake_ms']['median']:.2f} ms, "
