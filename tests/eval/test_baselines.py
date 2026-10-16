@@ -1,21 +1,25 @@
 import os
+import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
 
-import shutil, pytest
-pytestmark = pytest.mark.skipif(
+import pytest
+
+from hpqv import packet, secure
+from hpqv.eval import baselines
+from hpqv.eval.capture import count_ip_fragments
+from hpqv.keyring import Keyring
+
+needs_linux_tools = pytest.mark.skipif(
     shutil.which("tc") is None or shutil.which("tshark") is None,
     reason="needs Linux tc/tshark — run in the hpqv-eval container",
 )
 
-from hpqv import control as c
-from hpqv import handshake as h
-from hpqv.eval import baselines
-from hpqv.eval.capture import count_ip_fragments
 
-
+@needs_linux_tools
 def test_naive_udp_handshake_fragments(tmp_path):
     # A realistic PQC handshake blob exceeds the 1500B MTU (~6.4KB): must fragment.
     # Docker's loopback defaults to a 65536 MTU (no fragmentation possible below
@@ -41,40 +45,52 @@ def test_naive_udp_handshake_fragments(tmp_path):
         subprocess.run(["ip", "link", "set", "lo", "mtu", "65536"], check=True)
 
 
-def test_tcp_voice_round_trip():
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    srv = socket.socket()
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    port = srv.getsockname()[1]
-    box = {}
+@pytest.fixture
+def rings():
+    client, server = secure.local_pair()
+    try:
+        yield Keyring(client.media_keys()), Keyring(server.media_keys())
+    finally:
+        client.close()
+        server.close()
 
-    def responder():
-        conn, _ = srv.accept()
-        box["b"] = c.run_responder(conn, b_pub, b_sec, a_pub)
-        box["conn"] = conn
 
-    t = threading.Thread(target=responder)
-    t.start()
-    cli = socket.create_connection(("127.0.0.1", port))
-    sess_a = c.run_initiator(cli, a_pub, a_sec, b_pub)
-    t.join()
-    sess_b = box["b"]
-
+def test_tcp_voice_round_trip(rings):
+    ring_a, ring_b = rings
+    cli, conn = socket.socketpair()
     pcm = b"\x11\x22" * 960
-    frames = [pcm, pcm, pcm, pcm, pcm]
+    frames = [pcm] * 5
     out = {}
-    rx = threading.Thread(
-        target=lambda: out.__setitem__(
-            "frames", baselines.tcp_voice_recv(box["conn"], sess_b, expected=len(frames))
-        )
-    )
+    rx = threading.Thread(target=lambda: out.__setitem__(
+        "frames", baselines.tcp_voice_recv(conn, ring_b, expected=len(frames))))
     rx.start()
-    sent = baselines.tcp_voice_send(cli, sess_a, frames)
-    rx.join()
+    sent = baselines.tcp_voice_send(cli, ring_a, frames)
+    rx.join(10)
+    cli.close()
+    conn.close()
 
     assert sent == len(frames)
     assert len(out["frames"]) == len(frames)
     assert all(len(f) == len(pcm) for f in out["frames"])
+
+
+def test_tcp_voice_recv_rejects_oversize_length_before_allocating(rings):
+    _, ring_b = rings
+    cli, conn = socket.socketpair()
+    with cli, conn:
+        cli.sendall(struct.pack(">I", 200 * 1024 * 1024))
+        with pytest.raises(ValueError):
+            baselines.tcp_voice_recv(conn, ring_b, expected=1)
+
+
+def test_tcp_voice_recv_counts_a_tampered_datagram(rings):
+    ring_a, ring_b = rings
+    cli, conn = socket.socketpair()
+    with cli, conn:
+        dg = bytearray(ring_a.seal(0, b"\x01" * 40))
+        dg[-1] ^= 1
+        cli.sendall(struct.pack(">I", len(dg)) + bytes(dg))
+        with pytest.raises(packet.Reject) as exc:
+            baselines.tcp_voice_recv(conn, ring_b, expected=1)
+    assert exc.value.reason == "auth"
+    assert ring_b.rejects["auth"] == 1

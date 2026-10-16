@@ -137,7 +137,6 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
-    { name = "liboqs-python" },
     { name = "matplotlib" },
     { name = "numpy" },
     { name = "opuslib" },
@@ -154,7 +153,6 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "cryptography", specifier = ">=50.0.1" },
-    { name = "liboqs-python", specifier = ">=0.16.0" },
     { name = "matplotlib", specifier = ">=3.11.1" },
     { name = "numpy", specifier = ">=2.4.6" },
     { name = "opuslib", specifier = ">=3.0.1" },
@@ -201,15 +199,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/f4/ce/a7dc71353dd06a4cbe02222773f52d4a28c81e5a452a75797f8ed113dc99/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.whl", hash = "sha256:5daa1f19e097050b9c4d9a78fcc9263cb96c9dfae08037ddc1b7c4ad1889f2a2", size = 79891 },
     { url = "https://files.pythonhosted.org/packages/10/b1/d61c61a84ff85d1a36a99df2c152b59ffedb1d356c598902aba44abcdb60/kiwisolver-1.5.1-pp311-pypy311_pp73-manylinux_2_24_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:cdaeeb6c350106df6bf9d873395973e5f066a9713200b72cd64f55d0a3eafab6", size = 77605 },
     { url = "https://files.pythonhosted.org/packages/d3/52/5aef56f21a460a6e43ab3cdfc7697d59d7b87deb0ec97a0f7b91aa4a521b/kiwisolver-1.5.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:17851e5dad4484be0cbccbde3b15331deae036de9aebd45eed964487802b172f", size = 98465 },
-]
-
-[[package]]
-name = "liboqs-python"
-version = "0.16.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/f7/67/e0c9047b2808967a83f81afc05d2ed0502a5ea005f55e19264d0483274c9/liboqs_python-0.16.0.tar.gz", hash = "sha256:ee01445ccfbeab8dced956a642ce1eb5ba69438caba7ec291eea14083627d5c0", size = 75345 }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/99/e9/f571a20c6d5845b964812a359f6be88cd87e73238e6a599a0f2bafc28933/liboqs_python-0.16.0-py3-none-any.whl", hash = "sha256:50bb11a9767b88f68099cedef8de09f798f31eaba1aa18b483988bfcd50df440", size = 19661 },
 ]
 
 [[package]]

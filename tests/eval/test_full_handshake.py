@@ -9,8 +9,8 @@ from pathlib import Path
 
 import pytest
 
-from hpqv import handshake
 from hpqv.eval import full_handshake as fh, graphs
+from hpqv.eval import v1_handshake as handshake
 from hpqv.eval.netem import loopback_mtu, netem
 
 
@@ -82,9 +82,9 @@ def test_deadline_expiry_returns_failure_and_joins_peer(ids, transport, monkeypa
         return (None, None, None)
 
     if transport == "tcp":
-        monkeypatch.setattr(fh.control, "run_responder", delayed_peer)
+        monkeypatch.setattr(fh.v1, "run_responder", delayed_peer)
     else:
-        monkeypatch.setattr(fh.handshake, "accept_hello", delayed_peer)
+        monkeypatch.setattr(fh.v1, "accept_hello", delayed_peer)
 
     baseline = threading.active_count()
     run = (lambda: fh.run_tcp(ids, 0.3)) if transport == "tcp" else (
@@ -100,7 +100,8 @@ def test_deadline_expiry_returns_failure_and_joins_peer(ids, transport, monkeypa
 def test_udp_naive_clean_loopback_timing_excludes_responder_poll(ids):
     row = fh.measure("udp-naive", attempts=5, deadline_s=3)
 
-    assert row["median_ms"] < 20
+    # cryptography's ML-DSA sign takes ~20 ms on this path; a 50 ms responder poll would exceed this.
+    assert row["median_ms"] < 45
 
 
 def test_cli_uses_attempts_and_predicts_only_naive_udp(monkeypatch, tmp_path, capsys):

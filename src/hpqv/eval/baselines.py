@@ -8,21 +8,20 @@ def naive_send_handshake_udp(udp_sock, dest, blob: bytes) -> int:
     return udp_sock.sendto(blob, dest)
 
 
-def tcp_voice_send(sock, session, frames) -> int:
+def tcp_voice_send(sock, keyring, frames) -> int:
+    """Voice over one TCP stream, each v2 datagram length-prefixed. `keyring` is a keyring.Keyring."""
     from hpqv.audio import OpusCodec
-    key, send_prefix, _ = session
     codec = OpusCodec()
     n = 0
     for seq, pcm in enumerate(frames):
-        dg = packet.seal(key, send_prefix, seq, codec.encode(pcm))
+        dg = keyring.seal(seq, codec.encode(pcm))
         sock.sendall(struct.pack(">I", len(dg)) + dg)
         n += 1
     return n
 
 
-def tcp_voice_recv(sock, session, expected) -> list:
+def tcp_voice_recv(sock, keyring, expected) -> list:
     from hpqv.audio import OpusCodec
-    key, _, recv_prefix = session
     codec = OpusCodec()
     out = []
     buf = b""
@@ -42,9 +41,11 @@ def tcp_voice_recv(sock, session, expected) -> list:
         if hdr is None:
             break
         (ln,) = struct.unpack(">I", hdr)
+        if ln > packet.MAX_DATAGRAM:     # bounded: never allocate what the peer names
+            raise ValueError("voice record too large")
         dg = recvn(ln)
         if dg is None:
             break
-        _seq, _flags, opus = packet.open_(key, recv_prefix, dg)
+        _seq, _flags, opus = keyring.open_(dg)
         out.append(codec.decode(opus))
     return out

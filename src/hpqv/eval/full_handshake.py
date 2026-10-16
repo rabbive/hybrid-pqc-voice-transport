@@ -1,11 +1,14 @@
-"""Measure the authenticated PQC handshake over TCP and UDP."""
+"""Measure the authenticated v1 PQC handshake over TCP and UDP.
+
+HISTORICAL: this measures the v1 protocol (hpqv.eval.v1_handshake), not v2.
+"""
 import math
 import select
 import socket
 import threading
 import time
 
-from hpqv import control, handshake
+from hpqv.eval import v1_handshake as v1
 from hpqv.eval.handshake_survival import expected_fragments
 
 
@@ -50,7 +53,7 @@ def run_tcp(ids, deadline_s) -> tuple[bool, float]:
             listener.settimeout(_remaining(deadline))
             conn, _ = listener.accept()
             accepted.append(conn)
-            server["session"] = control.run_responder(
+            server["session"] = v1.run_responder(
                 _DeadlineSocket(conn, deadline), *ids[1], ids[0][0])
         except Exception:
             pass
@@ -62,7 +65,7 @@ def run_tcp(ids, deadline_s) -> tuple[bool, float]:
         thread.start()
         remaining = _remaining(deadline)
         initiator = socket.create_connection(listener.getsockname(), timeout=remaining)
-        result = control.run_initiator(
+        result = v1.run_initiator(
             _DeadlineSocket(initiator, deadline), *ids[0], ids[1][0])
         finished = time.monotonic()
         thread.join(0.1)
@@ -83,7 +86,7 @@ def run_tcp(ids, deadline_s) -> tuple[bool, float]:
 
 def _accept_for_hello(hello, peer_sig_pub, sig_secret, cache):
     if hello not in cache:
-        cache[hello] = handshake.accept_hello(hello, peer_sig_pub, sig_secret)
+        cache[hello] = v1.accept_hello(hello, peer_sig_pub, sig_secret)
     return cache[hello]
 
 
@@ -142,7 +145,7 @@ def run_udp(ids, deadline_s, retry: bool, rto_s=0.25) -> tuple[bool, float]:
         client.setblocking(False)
         thread = threading.Thread(target=respond)
         thread.start()
-        hello, kem, kem_pub = handshake.build_hello(*ids[0])
+        hello, kem, kem_pub = v1.build_hello(*ids[0])
         addr = server.getsockname()
         _send_udp(client, hello, addr, deadline)
         next_send = time.monotonic() + rto_s
@@ -158,7 +161,7 @@ def run_udp(ids, deadline_s, retry: bool, rto_s=0.25) -> tuple[bool, float]:
                 continue
             if peer != addr:
                 continue
-            initiated = handshake.finish(reply, kem, kem_pub, ids[1][0])
+            initiated = v1.finish(reply, kem, kem_pub, ids[1][0])
             finished = time.monotonic()
             done.set()
             thread.join(0.1)
@@ -184,9 +187,9 @@ def measure(transport, attempts, deadline_s) -> dict:
     if attempts <= 0 or deadline_s <= 0:
         raise ValueError("attempts and deadline_s must be positive")
 
-    ids = handshake.make_identity(), handshake.make_identity()
-    hello, _, _ = handshake.build_hello(*ids[0])
-    accept, _ = handshake.accept_hello(hello, ids[0][0], ids[1][1])
+    ids = v1.make_identity(), v1.make_identity()
+    hello, _, _ = v1.build_hello(*ids[0])
+    accept, _ = v1.accept_hello(hello, ids[0][0], ids[1][1])
     hello_bytes, accept_bytes = len(hello), len(accept)
     successes, elapsed = 0, []
     for _ in range(attempts):

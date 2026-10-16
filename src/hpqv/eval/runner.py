@@ -6,9 +6,9 @@ import tempfile
 import threading
 import time
 
-from hpqv import call, control, packet
-from hpqv import handshake as h
-from hpqv.audio import FRAME_BYTES
+from hpqv import packet, secure
+from hpqv.audio import FRAME_BYTES, OpusCodec
+from hpqv.keyring import Keyring
 from hpqv.udp import open_udp
 from hpqv.eval import baselines, stats
 from hpqv.eval import mos as mos_mod
@@ -16,53 +16,63 @@ from hpqv.eval.capture import capture, count_ip_fragments
 from hpqv.eval.netem import netem
 
 SILENCE = b"\x00" * FRAME_BYTES
-NAIVE_HANDSHAKE_BLOB_LEN = 6445  # a realistic PQC handshake, oversized past the 1500B MTU
+# The v1 HELLO was 6,446 B. The blob is random bytes of about that size: all this
+# scenario needs is one UDP datagram oversized past the 1500B MTU.
+NAIVE_HANDSHAKE_BLOB_LEN = 6445
 
 
-def _handshake_pair():
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    srv = socket.socket()
-    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    port = srv.getsockname()[1]
-    box = {}
+def _keyrings():
+    """(sender, receiver) v2 keyrings from a fresh TLS 1.3 handshake on loopback.
 
-    def responder():
+    v1 voice packets are gone from production, so the hybrid side seals v2
+    datagrams. Both formats are <= 1200 B, so the fragment counts these
+    scenarios report are unchanged.
+    """
+    client, server = secure.local_pair()
+    try:
+        return Keyring(client.media_keys()), Keyring(server.media_keys())
+    finally:
+        client.close()
+        server.close()
+
+
+def _tcp_pair():
+    """A plain loopback TCP connection (the voice-over-TCP baseline's transport)."""
+    with socket.socket() as srv:
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        cli = socket.create_connection(srv.getsockname())
         conn, _ = srv.accept()
-        box["conn"] = conn
-        box["session"] = control.run_responder(conn, b_pub, b_sec, a_pub)
-
-    t = threading.Thread(target=responder)
-    t.start()
-    cli = socket.create_connection(("127.0.0.1", port))
-    sess_a = control.run_initiator(cli, a_pub, a_sec, b_pub)
-    t.join()
-    srv.close()
-    return sess_a, box["session"], cli, box["conn"]
+    return cli, conn
 
 
-def _udp_recv_measure(sock, key, recv_prefix, expected, timeout=5.0):
+def _send_stream(udp_sock, dest, keyring, frames) -> int:
+    codec = OpusCodec()
+    for seq, pcm in enumerate(frames):
+        udp_sock.sendto(keyring.seal(seq, codec.encode(pcm)), dest)
+    return len(frames)
+
+
+def _udp_recv_measure(sock, keyring, expected, timeout=5.0):
     # Datagrams that fail to open (e.g. the naive scenario's reassembled
     # handshake blob) are noise, not measurement points — skip and keep waiting.
     sock.settimeout(timeout)
     seqs, arrivals = [], []
     while len(seqs) < expected:
         try:
-            dg, _ = sock.recvfrom(65535)
+            dg, _ = sock.recvfrom(packet.MAX_DATAGRAM + 1)
         except OSError:
             break
         try:
-            seq, _flags, _frame = packet.open_(key, recv_prefix, dg)
-        except Exception:
+            seq, _flags, _frame = keyring.open_(dg)
+        except packet.Reject:
             continue
         seqs.append(seq)
         arrivals.append(time.monotonic())
     return seqs, arrivals
 
 
-def _tcp_recv_measure(sock, key, recv_prefix, expected, timeout=10.0):
+def _tcp_recv_measure(sock, keyring, expected, timeout=10.0):
     sock.settimeout(timeout)
     seqs, arrivals = [], []
     buf = b""
@@ -82,20 +92,19 @@ def _tcp_recv_measure(sock, key, recv_prefix, expected, timeout=10.0):
         if hdr is None:
             break
         (ln,) = struct.unpack(">I", hdr)
+        if ln > packet.MAX_DATAGRAM:
+            break
         dg = recvn(ln)
         if dg is None:
             break
-        seq, _flags, _frame = packet.open_(key, recv_prefix, dg)
+        seq, _flags, _frame = keyring.open_(dg)
         seqs.append(seq)
         arrivals.append(time.monotonic())
     return seqs, arrivals
 
 
 def _run_hybrid(frames, loss_pct, delay_ms, jitter_ms, pcap):
-    sess_a, sess_b, cli, conn = _handshake_pair()
-    cli.close()
-    conn.close()
-    key_b, _send_prefix_b, recv_prefix_b = sess_b
+    ring_a, ring_b = _keyrings()
 
     tx = open_udp()
     rx = open_udp()
@@ -108,10 +117,10 @@ def _run_hybrid(frames, loss_pct, delay_ms, jitter_ms, pcap):
             t = threading.Thread(
                 target=lambda: result.update(
                     zip(("seqs", "arrivals"),
-                        _udp_recv_measure(rx, key_b, recv_prefix_b, len(frames)))))
+                        _udp_recv_measure(rx, ring_b, len(frames)))))
             t.start()
             connect_time = time.monotonic()
-            call.send_stream(tx, dest, sess_a, frames)
+            _send_stream(tx, dest, ring_a, frames)
             t.join(timeout=10.0)
         time.sleep(0.3)
 
@@ -121,10 +130,7 @@ def _run_hybrid(frames, loss_pct, delay_ms, jitter_ms, pcap):
 
 
 def _run_naive(frames, loss_pct, delay_ms, jitter_ms, pcap):
-    sess_a, sess_b, cli, conn = _handshake_pair()
-    cli.close()
-    conn.close()
-    key_b, _send_prefix_b, recv_prefix_b = sess_b
+    ring_a, ring_b = _keyrings()
 
     tx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rx = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -144,10 +150,10 @@ def _run_naive(frames, loss_pct, delay_ms, jitter_ms, pcap):
             t = threading.Thread(
                 target=lambda: result.update(
                     zip(("seqs", "arrivals"),
-                        _udp_recv_measure(rx, key_b, recv_prefix_b, len(frames)))))
+                        _udp_recv_measure(rx, ring_b, len(frames)))))
             t.start()
             connect_time = time.monotonic()
-            call.send_stream(tx, dest, sess_a, frames)
+            _send_stream(tx, dest, ring_a, frames)
             t.join(timeout=10.0)
         time.sleep(0.3)
 
@@ -157,8 +163,8 @@ def _run_naive(frames, loss_pct, delay_ms, jitter_ms, pcap):
 
 
 def _run_tcp(frames, loss_pct, delay_ms, jitter_ms, pcap):
-    sess_a, sess_b, cli, conn = _handshake_pair()
-    key_b, _send_prefix_b, recv_prefix_b = sess_b
+    ring_a, ring_b = _keyrings()
+    cli, conn = _tcp_pair()
 
     result = {}
     with capture("lo", pcap):
@@ -167,10 +173,10 @@ def _run_tcp(frames, loss_pct, delay_ms, jitter_ms, pcap):
             t = threading.Thread(
                 target=lambda: result.update(
                     zip(("seqs", "arrivals"),
-                        _tcp_recv_measure(conn, key_b, recv_prefix_b, len(frames)))))
+                        _tcp_recv_measure(conn, ring_b, len(frames)))))
             t.start()
             connect_time = time.monotonic()
-            baselines.tcp_voice_send(cli, sess_a, frames)
+            baselines.tcp_voice_send(cli, ring_a, frames)
             t.join(timeout=30.0)
         time.sleep(0.3)
 
