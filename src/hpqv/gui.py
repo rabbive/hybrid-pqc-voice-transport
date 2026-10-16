@@ -15,6 +15,7 @@ worker threads and the UI polls shared state on an `after()` timer, because
 touching widgets (or Tk variables) from a worker thread is the classic way to
 crash tkinter. Telemetry is sampled from that same timer, once a second.
 """
+import os
 import queue
 import socket
 import struct
@@ -32,6 +33,7 @@ from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_w
 from hpqv.gui_network import NetworkPanel
 from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
                              StatsPanel)
+from hpqv.secure import HandshakeError
 from hpqv.telemetry import Telemetry
 
 POLL_MS = 200
@@ -102,9 +104,10 @@ class DemoWindow:
         left.add(net_tab, text="Network")
         left.add(sec_tab, text="Security")
         self.conn = ConnectionPanel(call_tab, self._create_identity)
-        self.handshake_panel = HandshakePanel(call_tab, _handshake_info())
+        self.info = demo.handshake_info()
+        self.handshake_panel = HandshakePanel(call_tab, self.info)
         self.network = NetworkPanel(net_tab, self.controls)
-        self.security = SecurityPanel(sec_tab, self._rotate)
+        self.security = SecurityPanel(sec_tab, self._rotate, self.info)
 
         self.stats_panel = StatsPanel(right)
         graph_box = ttk.LabelFrame(right, text="Last 60 s")
@@ -121,27 +124,38 @@ class DemoWindow:
     # ---------------- identity ----------------
 
     def _create_identity(self):
+        """Writes NAME.key (0600) and NAME.crt next to each other and shows the fingerprint.
+
+        Key generation takes milliseconds, so it stays on the main thread; the
+        handshake, which can take seconds, never does.
+        """
         path = filedialog.asksaveasfilename(
-            title="Save a new demo identity", initialfile="identity.json",
-            defaultextension=".json", filetypes=[("JSON", "*.json")])
+            title="Name your identity (writes NAME.key and NAME.crt)", initialfile="me")
         if not path:
             return
+        base = path[:-4] if path.lower().endswith((".key", ".crt")) else path
+        key_path, cert_path = base + ".key", base + ".crt"
         try:
-            demo.create_identity(path)
+            fingerprint = demo.create_identity(os.path.basename(base), key_path, cert_path)
         except FileExistsError:
-            messagebox.showerror("Identity already exists", "Choose a new filename to preserve your existing keys.")
+            messagebox.showerror("Identity already exists",
+                                 "Choose a new name to keep your existing keys.")
         except Exception as exc:
             messagebox.showerror("Could not create identity", str(exc))
         else:
-            self.conn.identity.set(path)
-            self.state_label.config(text="identity saved; copy it privately to your other computer")
+            self.conn.key.set(key_path)
+            self.conn.cert.set(cert_path)
+            self.conn.show_fingerprint(fingerprint)
+            self.state_label.config(
+                text="identity saved; send only the .crt to the other person")
 
     # ---------------- call control ----------------
 
     def _args(self, cfg):
         """The same argument object the CLI builds, so one code path serves both."""
         return demo.call_args(
-            identity_file=cfg["identity"], input=cfg["input"], wav=cfg["wav"],
+            key=cfg["key"], cert=cfg["cert"], peer_cert=cfg["peer_cert"],
+            input=cfg["input"], wav=cfg["wav"],
             record_wav=cfg["record_wav"], drop_pct=self.controls.get("loss_pct"),
             seconds=MIC_SECONDS,                 # run until Hang up
             loop=cfg["input"] == "file",         # a WAV restarts at EOF, so Hang up ends the call
@@ -201,9 +215,8 @@ class DemoWindow:
         return getattr(self.call_handle, "rotation_ready", lambda: True)()
 
     def _end_text(self):
-        # callctl only exposes the flag privately; it is set when the reader saw a
-        # peer CALL_END or the TCP close.
-        return end_text(self._hung_up, bool(getattr(self.call_handle, "_peer_ended", False)))
+        h = self.call_handle
+        return end_text(self._hung_up, h.peer_ended, h.connection_lost, h.protocol_error)
 
     def _rotate(self):
         if not self._rotation_ready():
@@ -229,15 +242,19 @@ class DemoWindow:
         return None, None
 
     def _run(self, cfg):
-        """Worker thread: set up the connection, then hand off to demo._run_call."""
-        srv = conn = udp = None
+        """Worker thread: set up the connection, then hand off to demo._run_call.
+
+        Every blocking step (accept, TLS handshake, waiting for CALL_START) is
+        bounded and runs here, never on the Tk thread.
+        """
+        srv = conn = udp = channel = None
         stats, stop, handle = cfg["stats"], cfg["stop"], cfg["handle"]
         put = self.events.put
         try:
             args = self._args(cfg)
+            ident, peer_cert = demo._load_identity(args.key, args.cert, args.peer_cert)
             if cfg["mode"] == "listen":
                 put(("state", f"listening on {cfg['port']}…"))
-                sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "listener")
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 srv.bind(("0.0.0.0", cfg["port"]))
@@ -247,33 +264,34 @@ class DemoWindow:
                     put(("state", "hung up"))
                     return
                 put(("state", f"handshake with {addr[0]}…"))
-                session = demo.timed_handshake("responder", conn, sig_pub, sig_secret, peer_pub, stats)
+                channel = demo.establish_timed("server", conn, ident, peer_cert, stats)
                 udp = demo._open_bound_udp(cfg["port"])
-                _t, payload = control.recv_control(conn)
-                (peer_port,) = struct.unpack(">H", payload)
-                dest = (addr[0], peer_port)
+                put(("state", "waiting for the caller to start the call…"))
+                dest = demo.wait_call_start(channel, addr[0], stop_event=stop)
             else:
                 host, port_s = cfg["target"].rsplit(":", 1)
                 put(("state", f"connecting to {host}…"))
-                sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "caller")
-                conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                conn.connect((host, int(port_s)))
+                conn = socket.create_connection((host, int(port_s)), timeout=demo.CONNECT_TIMEOUT)
                 put(("state", "handshake…"))
-                session = demo.timed_handshake("initiator", conn, sig_pub, sig_secret, peer_pub, stats)
+                channel = demo.establish_timed("client", conn, ident, peer_cert, stats)
                 udp = demo._open_bound_udp(0)
-                control.send_control(conn, control.MSG_CALL_START,
-                                     struct.pack(">H", udp.getsockname()[1]))
+                channel.send(control.MSG_CALL_START,
+                             struct.pack(">H", udp.getsockname()[1]))
                 dest = (host, int(port_s))
 
             put(("connected", None))
             put(("state", "connected — talk"))
-            demo._run_call(conn, udp, dest, session, args, stats=stats, controls=self.controls,
+            demo._run_call(channel, udp, dest, args, stats=stats, controls=self.controls,
                            stop_event=stop, call_handle=handle)
             put(("state", self._end_text()))
+        except HandshakeError as e:
+            put(("state", "handshake failed: " + demo.handshake_failure_text(e.reason)))
+        except demo.CallSetupError as e:
+            put(("state", "hung up" if stop.is_set() else f"call not started: {e}"))
         except Exception as e:                      # surface failures in the UI, not a dead thread
             put(("state", f"error: {e}"))
         finally:
-            for s in (conn, srv, udp):
+            for s in (channel, conn, srv, udp):
                 if s is not None:
                     s.close()
             put(("done", None))
@@ -350,8 +368,8 @@ class DemoWindow:
         stats = self.stats.as_dict()
         self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
         self.handshake_panel.update(stats)
-        self.security.update(self._live, self.call_handle.key_generation(),
-                             self.call_handle.key_fingerprint(), ready=self._rotation_ready())
+        self.security.update(self._live, self.call_handle.key_generation(), stats,
+                             ready=self._rotation_ready())
         if rows or self.telemetry:
             self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
                               self._cc.now())
@@ -366,13 +384,6 @@ class DemoWindow:
         finally:
             if not self._closing:
                 self.root.after(POLL_MS, self._poll)
-
-
-def _handshake_info():
-    try:
-        return demo.handshake_info()
-    except Exception:                  # liboqs missing: the panel says so instead of blocking the window
-        return None
 
 
 def main():

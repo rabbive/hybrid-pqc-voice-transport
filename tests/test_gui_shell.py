@@ -15,6 +15,8 @@ import pytest
 from hpqv import gui
 from hpqv.gui import DemoWindow
 from hpqv.gui_logic import CallClock
+from hpqv.demo import Stats, handshake_info
+from hpqv.gui_logic import security_rows
 from hpqv.gui_panels import SecurityPanel
 
 
@@ -22,7 +24,7 @@ class FakeHandle:
     def __init__(self, ready=True, gen=1):
         self.hung = 0
         self.ready, self.gen = ready, gen
-        self._peer_ended = False
+        self.peer_ended = self.connection_lost = self.protocol_error = False
 
     def hang_up(self):
         self.hung += 1
@@ -33,8 +35,8 @@ class FakeHandle:
     def key_generation(self):
         return self.gen
 
-    def key_fingerprint(self):
-        return "ab:cd"
+    def sas(self):
+        return "abcd0123"
 
     def rotate_keys(self):
         self.gen += 1
@@ -162,15 +164,15 @@ def test_start_skips_wav_validation_for_the_microphone(monkeypatch):
 def test_mic_calls_run_until_hang_up_not_an_hour():
     win = make_window()
     win.controls = MagicMock(get=lambda k: 0)
-    args = win._args({"identity": "i", "input": "mic", "wav": None, "record_wav": None})
+    args = win._args({"key": "k", "cert": "c", "peer_cert": "p", "input": "mic", "wav": None, "record_wav": None})
     assert args.seconds >= 10 ** 6
 
 
 def test_wav_calls_loop_until_hang_up():
     win = make_window()
     win.controls = MagicMock(get=lambda k: 0)
-    wav = win._args({"identity": "i", "input": "file", "wav": "a.wav", "record_wav": None})
-    mic = win._args({"identity": "i", "input": "mic", "wav": None, "record_wav": None})
+    wav = win._args({"key": "k", "cert": "c", "peer_cert": "p", "input": "file", "wav": "a.wav", "record_wav": None})
+    mic = win._args({"key": "k", "cert": "c", "peer_cert": "p", "input": "mic", "wav": None, "record_wav": None})
     assert wav.loop is True and mic.loop is False
 
 
@@ -269,7 +271,7 @@ def test_poll_gates_the_rotate_button_on_rotation_ready():
 
 def test_handle_without_rotation_ready_counts_as_ready():
     win = make_window()
-    win.call_handle = SimpleNamespace(key_generation=lambda: 1, key_fingerprint=lambda: "x")
+    win.call_handle = SimpleNamespace(key_generation=lambda: 1, sas=lambda: "x")
     assert win._rotation_ready() is True
 
 
@@ -283,11 +285,14 @@ def test_rotate_click_is_ignored_while_the_old_key_retires():
 
 def test_security_panel_disables_and_relabels_the_button():
     panel = object.__new__(SecurityPanel)
-    panel.button, panel.gen, panel.fingerprint = MagicMock(), MagicMock(), MagicMock()
-    panel.update(True, 2, "ab", ready=False)
+    panel.info = handshake_info()
+    panel.button = MagicMock()
+    panel.values = {label: MagicMock() for label, _ in security_rows(panel.info, Stats().as_dict(), False, 0)}
+    stats = Stats().as_dict()
+    panel.update(True, 2, stats, ready=False)
     panel.button.state.assert_called_with(["disabled"])
     assert "retiring" in panel.button.config.call_args.kwargs["text"].lower()
-    panel.update(True, 2, "ab", ready=True)
+    panel.update(True, 2, stats, ready=True)
     panel.button.state.assert_called_with(["!disabled"])
     assert panel.button.config.call_args.kwargs["text"] == "Rotate keys"
 
@@ -298,6 +303,75 @@ def test_security_panel_disables_and_relabels_the_button():
                                               (False, False, "call ended")])
 def test_final_state_text(hung, peer, want):
     win = make_window()
-    win.call_handle._peer_ended = peer
+    win.call_handle.peer_ended = peer
     win._hung_up = hung
     assert win._end_text() == want
+
+
+def test_end_text_reads_the_handles_connection_lost_and_protocol_error_flags():
+    win = make_window()
+    win.call_handle.connection_lost = True
+    assert win._end_text() == "connection lost"
+    win.call_handle.protocol_error = True
+    assert "protocol" in win._end_text()
+
+
+# ---------------- worker: handshake failures are said in plain words ----------------
+
+def _run_worker(win, monkeypatch, *, fail, mode="call"):
+    import socket
+    from hpqv import demo
+    server = socket.create_server(("127.0.0.1", 0))
+    monkeypatch.setattr(demo, "_load_identity", lambda *a: (object(), b"peer"))
+    monkeypatch.setattr(demo, "establish_timed", fail)
+    cfg = {"mode": mode, "port": 0, "target": "127.0.0.1:%d" % server.getsockname()[1],
+           "key": "k", "cert": "c", "peer_cert": "p", "input": "mic", "wav": None,
+           "record_wav": None, "stop": win.stop_event, "stats": demo.Stats(),
+           "handle": win.call_handle}
+    win.controls = MagicMock(get=lambda k: 0)
+    try:
+        t = threading.Thread(target=win._run, args=(cfg,))
+        t.start()
+        t.join(5)
+        assert not t.is_alive()
+    finally:
+        server.close()
+    events = []
+    while not win.events.empty():
+        events.append(win.events.get_nowait())
+    return events
+
+
+def test_worker_shows_the_plain_words_for_a_handshake_failure(monkeypatch):
+    from hpqv.secure import HandshakeError
+
+    def boom(*a, **k):
+        raise HandshakeError("bad_peer_cert", "secret detail that must not be shown")
+
+    events = _run_worker(make_window(), monkeypatch, fail=boom)
+    state = [v for k, v in events if k == "state"][-1]
+    assert state.startswith("handshake failed:") and "certificate" in state
+    assert "bad_peer_cert" not in state and "secret detail" not in state
+    assert events[-1] == ("done", None)
+
+
+def test_worker_reports_an_unexpected_error_and_still_finishes(monkeypatch):
+    def boom(*a, **k):
+        raise RuntimeError("kaboom")
+
+    events = _run_worker(make_window(), monkeypatch, fail=boom)
+    assert ("state", "error: kaboom") in events and events[-1] == ("done", None)
+
+
+def test_identity_section_has_three_pickers_and_create_button(monkeypatch):
+    from hpqv import gui_panels
+    monkeypatch.setattr(gui_panels, "tk", MagicMock())
+    monkeypatch.setattr(gui_panels, "ttk", MagicMock())
+    gui_panels.ConnectionPanel(MagicMock(), on_create_identity=lambda: None)
+    labels = [c.kwargs.get("text", "") for c in gui_panels.ttk.Label.call_args_list]
+    buttons = [c.kwargs.get("text", "") for c in gui_panels.ttk.Button.call_args_list]
+    for want in ("My key", "My certificate", "Peer's certificate"):
+        assert want in labels
+    assert "Create identity" in buttons and buttons.count("…") >= 4     # 3 identity + 1 WAV
+    note = next(t for t in labels if "Never share the .key" in t)
+    assert ".crt" in note

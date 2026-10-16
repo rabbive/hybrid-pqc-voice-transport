@@ -11,11 +11,13 @@ import wave
 import numpy as np
 import pytest
 
-from hpqv import control, handshake as h
 from hpqv.controls import CallControls, DEFAULTS
-from hpqv.demo import FrameSink, Stats, handshake_info, timed_handshake
+from hpqv.demo import FrameSink, Stats
 from hpqv.eval.mos import mos_from_network
+from hpqv.packet import REJECT_REASONS
 from hpqv.telemetry import COLUMNS, Telemetry
+
+from v2pair import rings
 
 
 def _bump(stats, **delta):
@@ -135,12 +137,8 @@ def test_two_peers_each_measure_the_stream_they_receive():
     """A drops 20 % of what it sends; B sends fewer frames than A. Only B hears
     loss, and A, whose own receive stream is clean, must report none."""
     from hpqv.demo import _receiver_loop, _sender_loop
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    hello, kem, kem_pub = h.build_hello(a_pub, a_sec)
-    accept, _ = h.accept_hello(hello, a_pub, b_sec)
-    key, a_send, a_recv = h.finish(accept, kem, kem_pub, b_pub)
-    sess = {"A": (key, a_send, a_recv), "B": (key, a_recv, a_send)}
+    ring_a, ring_b = rings()
+    sess = {"A": ring_a, "B": ring_b}
     socks = {n: socket.socket(socket.AF_INET, socket.SOCK_DGRAM) for n in "AB"}
     for s in socks.values():
         s.bind(("127.0.0.1", 0))
@@ -335,45 +333,42 @@ def test_receiver_socket_error_ends_the_call():
         def recvfrom(self, n): raise ConnectionResetError(10054, "WSAECONNRESET")
 
     stop = threading.Event()
-    _receiver_loop(DeadSock(), (bytes(32), b"\0" * 4, b"\0" * 4), _Sink(),
+    _receiver_loop(DeadSock(), rings()[0], _Sink(),
                    CallControls(), Stats(), stop)
     assert stop.is_set()
 
 
-def test_handshake_info_matches_real_message_sizes():
-    pub, sec = h.make_identity()
-    hello, kem, kem_pub = h.build_hello(pub, sec)
-    accept, _ = h.accept_hello(hello, pub, sec)
-    info = handshake_info()
-    assert info["hello_bytes"] == len(hello) and info["accept_bytes"] == len(accept)
-    assert info["total_bytes"] == len(hello) + len(accept)
-    assert (info["kem"], info["sig"]) == ("ML-KEM-768", "ML-DSA-65")
-    assert (info["transport"], info["udp_fragments"], info["datagram_cap"]) == ("TCP", 0, 1200)
+def test_rejects_are_cumulative_columns_in_every_row():
+    stats, controls = Stats(), CallControls()
+    tel = Telemetry(stats, controls)
+    assert all(f"rejects_{r}" in COLUMNS for r in REJECT_REASONS)
+    assert tel.sample(1.0)["rejects_replay"] == 0
+    stats.rejects = {**stats.rejects, "replay": 3, "auth": 1}
+    row = tel.sample(2.0)
+    assert (row["rejects_replay"], row["rejects_auth"], row["rejects_oversize"]) == (3, 1, 0)
+    stats.rejects = {**stats.rejects, "replay": 4}
+    assert tel.sample(3.0)["rejects_replay"] == 4
 
 
-def test_timed_handshake_fills_stats_in_loopback():
-    a_pub, a_sec = h.make_identity()
-    b_pub, b_sec = h.make_identity()
-    srv = socket.socket()
-    srv.bind(("127.0.0.1", 0))
-    srv.listen(1)
-    box = {"stats": Stats()}
+def test_export_never_writes_the_sas_the_fingerprint_or_key_material(tmp_path):
+    tel, stats = _filled(tmp_path)
+    stats.sas, stats.peer_fingerprint = "c0ffee42", "dead beef " * 15 + "dead beef"
+    stats.group, stats.cipher = "X25519MLKEM768", "TLS_AES_256_GCM_SHA384"
+    stats.handshake_ms, stats.handshake_bytes = 41.5, 20000
+    paths = tel.export(str(tmp_path / "out"))
+    assert not {"sas", "peer_fingerprint"} & set(COLUMNS)
+    for p in paths:
+        if p.endswith((".csv", ".md")):
+            text = open(p, encoding="utf-8").read().lower()
+            assert "c0ffee42" not in text and "dead beef" not in text
+            assert "fingerprint" not in text and "sas" not in text.split()
+    summary = open(paths[1], encoding="utf-8").read()
+    assert "X25519MLKEM768" in summary and "20000 B" in summary     # public negotiation facts
+    assert "HELLO" not in summary                                    # v1 wording is gone
 
-    def responder():
-        conn, _ = srv.accept()
-        box["session"] = timed_handshake("responder", conn, b_pub, b_sec, a_pub, box["stats"])
-        conn.close()
 
-    t = threading.Thread(target=responder)
-    t.start()
-    cli = socket.create_connection(srv.getsockname())
-    init_stats = Stats()
-    session = timed_handshake("initiator", cli, a_pub, a_sec, b_pub, init_stats)
-    t.join()
-    cli.close()
-    srv.close()
-    assert session[0] == box["session"][0]       # same key: the wrapper didn't disturb the protocol
-    expected = handshake_info()["total_bytes"]
-    for stats in (init_stats, box["stats"]):
-        assert stats.handshake_ms > 0
-        assert stats.handshake_bytes == expected
+def test_summary_lists_the_reject_counters(tmp_path):
+    tel, stats = _filled(tmp_path)
+    stats.rejects = {**stats.rejects, "replay": 7}
+    summary = tel.export(str(tmp_path / "out"))[1]
+    assert "replay 7" in open(summary, encoding="utf-8").read()

@@ -61,7 +61,7 @@ def test_cli_loop_flag_reaches_the_frame_source(monkeypatch):
     monkeypatch.setattr(demo, "FrameSource", fake)
     args = demo.argparse.Namespace(input="file", wav="x.wav", seconds=1, loop=True)
     try:
-        demo._run_call(None, None, None, None, args)
+        demo._run_call(None, None, None, args)
     except Stop:
         pass
     assert seen["loop"] is True
@@ -73,9 +73,59 @@ def test_call_args_carries_every_cli_default_so_code_built_calls_cannot_drift():
     args = demo.call_args(input="file", wav="x.wav")
     assert (args.input, args.wav, args.loop, args.record_wav) == ("file", "x.wav", False, None)
     assert args.jitter_depth == 3 and args.output == "speaker"
+    assert (args.key, args.cert, args.peer_cert) == (None, None, None)
+    assert not hasattr(args, "identity_file")
 
 
 def test_call_args_rejects_unknown_names():
     import pytest
     with pytest.raises(TypeError):
         demo.call_args(jiter_depth=3)
+
+
+def test_cli_listen_and_call_complete_a_real_call(tmp_path):
+    """The CLI entry points end to end: keygen x2, TCP + TLS, CALL_START, UDP voice."""
+    import socket
+    import threading
+
+    for name in ("alice", "bob"):
+        demo.main(["keygen", "--name", name, "--key-out", str(tmp_path / f"{name}.key"),
+                   "--cert-out", str(tmp_path / f"{name}.crt")])
+    wav = _wav(tmp_path)
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+
+    def common(me, other, out):
+        return ["--key", str(tmp_path / f"{me}.key"), "--cert", str(tmp_path / f"{me}.crt"),
+                "--peer-cert", str(tmp_path / f"{other}.crt"), "--input", "file", "--wav", wav,
+                "--output", "file", "--out-wav", str(tmp_path / out)]
+
+    errors = []
+
+    def run(argv):
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                return demo.main(argv)
+            except ConnectionRefusedError:       # the listener is not up yet: try again
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.05)
+            except BaseException as e:
+                errors.append(e)
+                return
+
+    listener = threading.Thread(target=run, args=(["listen", "--port", str(port)]
+                                                  + common("bob", "alice", "bob.wav"),))
+    caller = threading.Thread(target=run, args=(["call", f"127.0.0.1:{port}"]
+                                                + common("alice", "bob", "alice.wav"),))
+    listener.start()
+    caller.start()
+    caller.join(30)
+    listener.join(30)
+    assert not caller.is_alive() and not listener.is_alive()
+    assert errors == []
+    for out in ("alice.wav", "bob.wav"):
+        with wave.open(str(tmp_path / out), "rb") as w:
+            assert w.getnframes() > 0
