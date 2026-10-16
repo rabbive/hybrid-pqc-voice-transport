@@ -122,7 +122,8 @@ def test_removed_c_library_absent_from_eval_packaging_and_ci():
     """Scope: the paths T5 owns. src/hpqv/{demo,handshake}.py are T4's / the integrator's."""
     root = SRC.parents[1]
     paths = [p for d in ("src/hpqv/eval", "packaging", "scripts", ".github", "eval")
-             for p in (root / d).rglob("*") if p.is_file()]
+             for p in (root / d).rglob("*")
+             if p.is_file() and "__pycache__" not in p.parts]   # stale bytecode is not source
     paths += [root / "pyproject.toml", root / "uv.lock"]
     hits = [str(p.relative_to(root)) for p in paths
             if NEEDLE in p.read_text(errors="ignore").lower()
