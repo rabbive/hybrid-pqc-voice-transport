@@ -13,6 +13,37 @@ audience sees (FEC vs silence vs PLC, burst loss, jitter depth), point to
 
 ---
 
+## Review III script (v2): encrypted, authenticated, and what changed since Review II
+
+Six minutes, before the long script below. Laptop A listens, laptop B calls, and the
+narrator drives Wireshark on A (or on a third laptop on the same LAN). Both laptops run
+the `feat/secure-session-v2` build or later; v2 does not talk to the v1 release.
+
+**Setup (replaces section 1's "one identity file" step, which is v1).**
+- [ ] On each laptop: Call tab → *Create identity*. Each writes `NAME.key` (stays on that
+  laptop) and `NAME.crt`. Swap **only the `.crt` files** and choose the other laptop's
+  file as *Peer's certificate*.
+- [ ] Wireshark with the hpqv plugin installed, *Decode As* TCP 9000 → TLS set, capturing
+  on the LAN interface with filter `host <B's IP>` ([guide](DEMO-WIRESHARK.md)).
+- [ ] Rehearse once on two laptops. The automated tests cover the prompt's Decline,
+  Hang up and Accept paths, but audio after Accept and the matching code on both screens
+  have only been checked by a person at rehearsal.
+
+| Step | Do | Say | If it fails |
+|---|---|---|---|
+| 1 | Show the two `.crt` files being swapped. | "At Review II both laptops shared one file holding both secret keys. Now each laptop's secret key never leaves it." | — |
+| 2 | Start the Wireshark capture. A: *Start* (listen). B: *Start* (call). | "The handshake is standard TLS 1.3 with a hybrid classical plus post-quantum key exchange." | B shows *handshake failed: …*: read the plain-words reason; usually the wrong peer certificate was chosen. |
+| 3 | A's **Incoming call** prompt opens. Both read the code aloud: A from the prompt, B from its Security tab. A presses **Accept**. B's state changes from *ringing* to *connected — talk*. | "If anyone were in the middle, these two codes would differ. You compare them out loud before you answer." | No prompt: A is not listening on 9000, or B's firewall blocked it. No answer in 30 s declines the call; just call again. |
+| 4 | Wireshark: `tls.handshake.type == 2` → group X25519MLKEM768; `tls.app_data` → certificates encrypted; `ip.flags.mf == 1` → nothing; `hpqv` → voice packets. | "About 21 kB of handshake, never fragmented. Every voice packet is under 1200 bytes, and its payload is ciphertext." | No `HPQV` rows: plugin not loaded (*Help → About → Plugins*). |
+| 5 | A: Security tab, *What an eavesdropper sees*. Match its sequence number and first payload bytes to the latest `hpqv` packet. | "This is everything on the wire. Without the session keys, the voice inside cannot be decoded." | — |
+| 6 | Press **Rotate keys**. | "New keys mid-call: the generation in the header goes from 0 to 1, and the audio does not stop." | Button says *old key retiring…*: wait 4 s and press again. |
+| 7 | Network tab: Bad Wi-Fi preset, then repair modes (section 2's 3:00–10:00). | "The Review II loss demo, now on the v2 protocol." | — |
+| 8 | Slide from [RELATED-WORK.md](RELATED-WORK.md). | "Of the four projects we compared, only ours reports measurements of how the post-quantum handshake behaves under loss." | — |
+
+Hang up on either laptop ends both. The handshake-failure wording is `demo.FAILURE_TEXT`.
+
+---
+
 ## 0. Who does what, and the one idea to get right
 
 Team of three works best: **driver A** (network laptop), **driver B** (listening laptop on the
