@@ -88,6 +88,6 @@ I found no way to break authentication or key secrecy in the v1→v2 diff. Pinni
 | Docs §7.1, §9, §12 wording; status line | **Open.** Phase B docs task |
 | `SSL.Error` from `bio_write` / READY send can escape `establish` | **Open.** Not reproduced by T6 or here |
 | `test_demo_does_not_import_liboqs_or_the_v1_handshake` checks a dead module name | **Open.** The static grep test in `tests/eval` covers it |
-| Questions for a human cryptographer | Unchanged. Listed in `docs/reviews/2026-10-16-b1-verification.md` §8 of the B1 report |
+| Questions for a human cryptographer | Unchanged. See "For a human cryptographer" above; still open |
 
 Verification record: [2026-10-16-b1-verification.md](2026-10-16-b1-verification.md).
