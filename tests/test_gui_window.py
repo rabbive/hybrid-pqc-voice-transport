@@ -165,6 +165,8 @@ def test_security_tab_has_a_wire_panel_that_starts_empty(root):
     assert all(lbl.cget("text") == NONE for lbl in win.wire.values.values())
     ring = Keyring(MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
                              session_id=b"abcd"))
+    win.events.put(("connected", None))
+    win._poll()
     with win.stats.lock:
         win.stats.last_datagram = ring.seal(42, b"\x00" * 50)
     win._refresh()
@@ -203,3 +205,38 @@ def test_incoming_event_opens_a_dialog_and_done_closes_it(root):
     win.events.put(("done", None))
     win._drain()
     assert win._dialog is None and not top.winfo_exists()
+
+
+def _sealed(seq):
+    from hpqv.keyring import Keyring
+    from hpqv.secure import MediaKeys
+    ring = Keyring(MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
+                             session_id=b"abcd"))
+    return ring.seal(seq, b"\x00" * 50)
+
+
+def test_wire_panel_blanks_when_the_call_ends(root):
+    from hpqv.gui_logic import NONE
+    win = DemoWindow(root)
+    win.events.put(("connected", None))
+    win._poll()
+    with win.stats.lock:
+        win.stats.last_datagram = _sealed(9)
+    win._refresh()
+    assert win.wire.values["Sequence"].cget("text") == "9"
+    win.events.put(("done", None))
+    win._poll()
+    assert all(lbl.cget("text") == NONE for lbl in win.wire.values.values())
+
+
+def test_caller_call_clock_and_telemetry_start_at_first_audio_not_while_ringing(root):
+    win = DemoWindow(root)
+    win.events.put(("ringing", None))
+    win._poll()
+    assert win.telemetry is None and not win._live     # ringing rows would read as perfect MOS
+    assert "ringing" in win.state_label.cget("text")
+    with win.stats.lock:
+        win.stats.received = 1
+    win._poll()
+    assert win._live and win.telemetry is not None
+    assert win.state_label.cget("text") == "connected — talk"

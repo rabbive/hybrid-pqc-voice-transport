@@ -300,9 +300,13 @@ class DemoWindow:
                              struct.pack(">H", udp.getsockname()[1]))
                 dest = (host, int(port_s))
 
-            put(("connected", None))
-            # The caller cannot tell when the listener presses Accept; first audio means it did.
-            put(("ringing", None) if cfg["mode"] == "call" else ("state", "connected — talk"))
+            if cfg["mode"] == "call":
+                # The caller cannot tell when the listener presses Accept; first audio
+                # means it did, and the call clock and telemetry start then (_refresh).
+                put(("ringing", None))
+            else:
+                put(("connected", None))
+                put(("state", "connected — talk"))
             demo._run_call(channel, udp, dest, args, stats=stats, controls=self.controls,
                            stop_event=stop, call_handle=handle)
             put(("state", self._end_text()))
@@ -365,6 +369,13 @@ class DemoWindow:
 
     # ---------------- UI refresh (main thread only) ----------------
 
+    def _go_live(self):
+        """The call is up: start the graph clock and telemetry, allow key rotation."""
+        self._live = True
+        self._cc.start()
+        self._last_sample = self._clock()
+        self.telemetry = Telemetry(self.stats, self.controls)
+
     def _sample(self):
         self.telemetry.sample(self._cc.now())
         self._last_sample = self._clock()
@@ -383,10 +394,7 @@ class DemoWindow:
                 self._ringing = True
                 self.state_label.config(text="ringing — waiting for them to answer")
             elif kind == "connected":
-                self._live = True
-                self._cc.start()
-                self._last_sample = self._clock()
-                self.telemetry = Telemetry(self.stats, self.controls)
+                self._go_live()
             elif kind == "exported":
                 self.export_btn.state(["!disabled"])
                 self.export_label.config(text="Exported:\n" + "\n".join(value))
@@ -416,12 +424,13 @@ class DemoWindow:
         stats = self.stats.as_dict()
         if self._ringing and stats["received"] > 0:
             self._ringing = False
+            self._go_live()
             self.state_label.config(text="connected — talk")
         self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
         self.handshake_panel.update(stats)
         self.security.update(self._live, self.call_handle.key_generation(), stats,
                              ready=self._rotation_ready())
-        self.wire.update(stats["last_datagram"])
+        self.wire.update(stats["last_datagram"] if self._live else b"")
         if rows or self.telemetry:
             self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
                               self._cc.now())

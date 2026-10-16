@@ -57,9 +57,10 @@ or `WIRESHARK_PLUGIN_DIR=<folder holding hpqv.lua>`.)
 | 7 | *Telephony → RTP → RTP Streams* | **No streams.** There is no plaintext RTP for Wireshark to pick up and play, unlike ordinary VoIP. |
 | 8 | `hpqv.gen` column | Press **Rotate keys** in the app: the key generation steps 0 → 1 → 2 while the audio keeps playing. |
 
-The app's Security tab panel *What an eavesdropper sees* shows the same bytes as
-the latest `hpqv` packet: compare its sequence number and first payload bytes
-with Wireshark's packet details.
+The app's Security tab panel *What an eavesdropper sees* shows this laptop's latest
+outgoing packet during a call. Filter `hpqv && ip.src == <this laptop's IP>` and
+compare the session id, key generation and size; at 50 packets a second the
+sequence number moves too fast to match by eye. The panel clears when the call ends.
 
 ## If something looks wrong
 
