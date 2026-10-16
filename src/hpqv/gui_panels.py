@@ -6,8 +6,8 @@ the window shell never reaches into a panel's internals.
 import tkinter as tk
 from tkinter import filedialog, ttk
 
-from hpqv.gui_logic import (NONE, SAS_HINT, handshake_rows, rotate_button_state,
-                            security_rows, stat_tiles, wrap_fingerprint)
+from hpqv.gui_logic import (NONE, SAS_HINT, WIRE_LABELS, handshake_rows, rotate_button_state,
+                            security_rows, stat_tiles, wire_rows, wrap_fingerprint)
 
 
 class ConnectionPanel:
@@ -187,6 +187,57 @@ class SecurityPanel:
         self.button.state(["!disabled"] if enabled else ["disabled"])
         for label, value in security_rows(self.info, stats, live, generation):
             self.values[label].config(text=value)
+
+
+class WirePanel(_Grid):
+    """The last datagram this peer sent, as anyone on the network sees it."""
+
+    def __init__(self, parent):
+        box = ttk.LabelFrame(parent, text="What an eavesdropper sees (your last packet)")
+        box.pack(fill="x", padx=6, pady=4)
+        super().__init__(box, WIRE_LABELS)
+        self.values["Payload bytes (first 32)"].config(style="Mono.TLabel", justify="left")
+        ttk.Label(box, text="This is everything the network carries. The voice is inside the "
+                  "encrypted payload; without the session keys it cannot be decoded. "
+                  "Wireshark shows the same bytes.", wraplength=480).grid(
+            row=len(WIRE_LABELS), column=0, columnspan=2, sticky="w", padx=6, pady=4)
+
+    def update(self, dg):
+        self.show(wire_rows(dg))
+
+
+class IncomingCallDialog:
+    """Accept / Decline prompt for an incoming call, with the caller's fingerprint and
+    the SAS in large type. Not modal: the window keeps polling while it is open.
+    Closing it with the window's X counts as Decline; close() just removes it."""
+
+    def __init__(self, root, text, sas, on_answer):
+        self._on_answer = on_answer
+        self._answered = False
+        self.top = tk.Toplevel(root)
+        self.top.title("Incoming call")
+        self.top.transient(root)
+        self.top.protocol("WM_DELETE_WINDOW", lambda: self.answer(False))
+        ttk.Label(self.top, text=text, style="Mono.TLabel", justify="left").pack(
+            padx=16, pady=(16, 4), anchor="w")
+        ttk.Label(self.top, text=sas, style="Sas.TLabel").pack(pady=8)
+        buttons = ttk.Frame(self.top)
+        buttons.pack(pady=(4, 16))
+        ttk.Button(buttons, text="Accept", command=lambda: self.answer(True)).pack(
+            side="left", padx=8)
+        ttk.Button(buttons, text="Decline", command=lambda: self.answer(False)).pack(
+            side="left", padx=8)
+
+    def answer(self, accepted):
+        if self._answered:
+            return
+        self._answered = True
+        self.close()
+        self._on_answer(accepted)
+
+    def close(self):
+        if self.top.winfo_exists():
+            self.top.destroy()
 
 
 class StatsPanel(_Grid):

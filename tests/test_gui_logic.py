@@ -1,14 +1,20 @@
 """Pure GUI logic: presets, slider mapping, stats text. No Tk needed."""
+import queue
+import threading
+import time
 import wave
 
 import pytest
 
 from hpqv.controls import CallControls, DEFAULTS
-from hpqv.gui_logic import (NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
-                            format_sas, handshake_rows, preset_values, rotate_button_state,
-                            security_rows, snapshot_for_export, stat_tiles, validate_wav,
-                            wrap_fingerprint)
+from hpqv.gui_logic import (NONE, NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
+                            format_sas, handshake_rows, incoming_call_text, preset_values, rotate_button_state,
+                            security_rows, snapshot_for_export, stat_tiles, validate_wav, wait_for_answer,
+                            wire_rows, wrap_fingerprint)
+from hpqv import packet
 from hpqv.demo import Stats, handshake_info
+from hpqv.keyring import Keyring
+from hpqv.secure import MediaKeys
 
 SPEC = {s.knob: s for s in SLIDERS}
 
@@ -250,3 +256,64 @@ def test_pairing_prompt_shows_code_and_warns_on_changed_key():
     assert "123 456" in body and "bob" in body and "WARNING" not in body
     _, warned = pairing_prompt("123 456", "bob", "0000 " * 15 + "abcd", True)
     assert warned.startswith("WARNING") and "different" in warned
+
+
+def test_wire_rows_before_any_datagram():
+    assert all(v == NONE for _, v in wire_rows(b""))
+
+
+def test_wire_rows_show_header_fields_and_only_ciphertext():
+    keys = MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
+                     session_id=b"\xab\xcd\x00\x01")
+    ring = Keyring(keys)
+    ring.rotate_next()                                # generation 1
+    dg = ring.seal(7, b"\x55" * 60, extra_flags=packet.FLAG_FEC)
+    rows = dict(wire_rows(dg))
+    assert rows["Size on the wire"] == f"{len(dg)} B (cap 1200 B)"
+    assert rows["Version/type"] == "0x21 (v2 voice)"
+    assert rows["Session id"] == "abcd0001"
+    assert rows["Sequence"] == "7"
+    assert rows["Key generation (mod 4)"] == "1"
+    assert rows["FEC hint"] == "on"
+    assert rows["Encrypted payload + tag"] == f"{len(dg) - 12} B"
+    assert "55 55 55" not in rows["Payload bytes (first 32)"]     # plaintext never appears
+    assert rows["Payload bytes (first 32)"].replace(" ", "").replace("\n", "") == dg[12:44].hex()
+
+
+def test_wire_rows_for_a_malformed_datagram():
+    rows = dict(wire_rows(b"\x00" * 40))
+    assert rows["Version/type"] == "not a v2 datagram"
+    assert rows["Sequence"] == NONE
+
+
+def test_incoming_call_text_shows_wrapped_fingerprint_and_sas():
+    fp = " ".join(["abcd"] * 16)
+    text = incoming_call_text(fp, "c0ffee42")
+    assert wrap_fingerprint(fp) in text and "c0ff ee42" in text
+    assert "paired" not in text
+
+
+def test_incoming_call_text_names_a_paired_friend():
+    text = incoming_call_text(" ".join(["abcd"] * 16), "c0ffee42", name="bob")
+    assert text.startswith("Incoming call from bob (paired).")
+
+
+def test_wait_for_answer_accept_decline_timeout():
+    q = queue.Queue()
+    q.put(True)
+    assert wait_for_answer(q, threading.Event(), 1.0) is True
+    q.put(False)
+    assert wait_for_answer(q, threading.Event(), 1.0) is False
+    t0 = time.monotonic()
+    assert wait_for_answer(queue.Queue(), threading.Event(), 0.3) is False
+    assert 0.25 <= time.monotonic() - t0 < 1.0
+
+
+def test_wait_for_answer_returns_false_when_stopped():
+    stop = threading.Event()
+    stop.set()
+    q = queue.Queue()
+    q.put(True)                       # Hang up wins even over a queued Accept
+    t0 = time.monotonic()
+    assert wait_for_answer(q, stop, 30.0) is False
+    assert time.monotonic() - t0 < 0.5

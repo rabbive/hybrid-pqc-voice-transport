@@ -23,6 +23,7 @@ STATUS_INTERVAL = 1.0
 FRAME_MS = 1000 * FRAME_SAMPLES // FS     # 20
 CALL_START_TIMEOUT = 10.0                 # the listener waits this long for CALL_START
 CONNECT_TIMEOUT = 10.0
+ANSWER_TIMEOUT = 30.0                     # an unanswered incoming call is declined after this
 
 
 class CallSetupError(Exception):
@@ -295,6 +296,9 @@ class Stats:
         self.rx_transit_n = 0
         self.rx_transit_min_ms = 0.0
         self.max_datagram = 0        # largest UDP payload sent, bytes (cap: 1200)
+        # Exact bytes of the last datagram sent: header and ciphertext, what the
+        # network carries. For the screen only; telemetry never exports it.
+        self.last_datagram = b""
         self.key_gen = 0             # live key-rotation generation
         self.handshake_ms = 0.0
         self.handshake_bytes = 0
@@ -384,6 +388,7 @@ def _sender_loop(udp_sock, dest, ring, source, controls, stats, stop_event, seed
         with stats.lock:
             stats.sent += 1
             stats.max_datagram = max(stats.max_datagram, len(dg))
+            stats.last_datagram = dg
 
     delay_line = DelayLine(deliver, seed=None if seed is None else seed + 1)
     last_fec, last_bitrate = True, 0
@@ -616,6 +621,25 @@ def wait_call_start(channel, peer_ip, timeout=CALL_START_TIMEOUT, stop_event=Non
         if port == 0:
             raise CallSetupError("CALL_START announced UDP port 0")
         return peer_ip, port
+
+
+def drain_udp(sock, limit=4096) -> int:
+    """Discard datagrams already queued on `sock` without blocking; at most `limit`,
+    so a flood cannot hold the caller here. Returns how many were discarded."""
+    timeout = sock.gettimeout()
+    sock.setblocking(False)
+    n = 0
+    try:
+        while n < limit:
+            sock.recv(packet.MAX_DATAGRAM + 1)
+            n += 1
+    except (BlockingIOError, InterruptedError):
+        pass
+    except OSError:                  # e.g. Windows WSAECONNRESET: nothing more to drain
+        pass
+    finally:
+        sock.settimeout(timeout)
+    return n
 
 
 def _fail(what, exc):
@@ -914,7 +938,8 @@ def main(argv=None):
     p_keygen.set_defaults(func=keygen)
 
     p_listen = sub.add_parser("listen", help="wait for an incoming call (paired friends, "
-                                            "or the peer given with --peer-cert)")
+                                            "or the peer given with --peer-cert); the GUI "
+                                            "asks before answering")
     p_listen.add_argument("--port", type=int, required=True)
     p_listen.add_argument("--no-discovery", action="store_true")
     _add_common_call_args(p_listen)

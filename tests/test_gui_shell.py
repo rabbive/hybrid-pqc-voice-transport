@@ -52,7 +52,7 @@ def make_window(clock=None):
     win._now = now
     win._cc = CallClock(win._clock)
     win.stats = MagicMock()
-    win.stats.as_dict.return_value = {}
+    win.stats.as_dict.return_value = {"last_datagram": b""}
     win.stats.levels.return_value = (0, 0)
     win.controls = MagicMock()
     win.stop_event = threading.Event()
@@ -60,11 +60,13 @@ def make_window(clock=None):
     win.telemetry = None
     win.events = queue.Queue()
     win.worker = None
-    win._live = win._hung_up = win._closing = False
+    win._live = win._hung_up = win._closing = win._ringing = False
+    win._dialog = None
+    win._answers = queue.Queue()
     win._last_sample = 0.0
     win._export_thread = None
     for name in ("state_label", "start_btn", "stop_btn", "export_btn", "export_label", "conn",
-                 "stats_panel", "handshake_panel", "security", "graph"):
+                 "stats_panel", "handshake_panel", "security", "wire", "graph"):
         setattr(win, name, MagicMock())
     return win
 
@@ -433,3 +435,145 @@ def test_ask_user_is_no_when_the_peer_cancels_first(monkeypatch):
     t0 = time.monotonic()
     assert win._ask_user("123 456", "bob", "a" * 79, False, cancel) is False
     assert time.monotonic() - t0 < 3
+
+
+# ---------------- worker: the listener asks before answering (real TLS) ----------------
+
+def _start_listener(win, monkeypatch, friend_home=None, caller_name="caller", paired=False):
+    """Start the listener worker on a free port. With `friend_home` it runs in friend
+    mode (no files) with that HPQV_HOME; `paired` pins the caller there first.
+    Returns (thread, cfg, caller, listener, sock)."""
+    import socket
+    from hpqv import demo, identity, pairflow, paths
+    caller = identity.new(caller_name)
+    if friend_home is not None:
+        monkeypatch.setenv("HPQV_HOME", str(friend_home))
+        listener = paths.device_identity("listener")
+        if paired:
+            pairflow.store().add(caller.cert_pem)
+    else:
+        listener = identity.new("listener")
+        monkeypatch.setattr(demo, "_load_identity", lambda *a: (listener, caller.cert_pem))
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    cfg = {"mode": "listen", "port": port, "target": "", "key": "k", "cert": "c",
+           "peer_cert": "p", "input": "mic", "wav": None, "record_wav": None,
+           "stop": win.stop_event, "stats": demo.Stats(), "handle": win.call_handle,
+           "answers": queue.Queue(), "friends": friend_home is not None}
+    win.controls = MagicMock(get=lambda k: 0)
+    t = threading.Thread(target=win._run, args=(cfg,))
+    t.start()
+    for _ in range(50):
+        try:
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            break
+        except OSError:
+            time.sleep(0.05)
+    return t, cfg, caller, listener, sock
+
+
+def _listen_real_tls(win, monkeypatch, act, friend_home=None):
+    """Run the listener worker against a real caller-side TLS channel. `act(cfg, ch)`
+    plays the user once the prompt event has been raised; returns (events, cfg)."""
+    import struct
+    from hpqv import control, secure
+    t, cfg, caller, listener, sock = _start_listener(
+        win, monkeypatch, friend_home, "caller" if friend_home is None else "bob", paired=True)
+    ch = secure.SecureChannel.establish(sock, "client", caller, listener.cert_pem)
+    ch.send(control.MSG_CALL_START, struct.pack(">H", 5555))
+    events = []
+    deadline = time.monotonic() + 5
+    while not any(k == "incoming" for k, _ in events) and time.monotonic() < deadline:
+        try:
+            events.append(win.events.get(timeout=0.1))
+        except queue.Empty:
+            pass
+    try:
+        act(cfg, ch)
+        t.join(5)
+        assert not t.is_alive()
+    finally:
+        ch.close()
+    while not win.events.empty():
+        events.append(win.events.get_nowait())
+    return events, cfg
+
+
+def test_listener_prompt_carries_the_peers_fingerprint_and_sas_and_decline_ends_the_call(
+        monkeypatch):
+    from hpqv import control
+    got = {}
+
+    def decline(cfg, ch):
+        cfg["answers"].put(False)
+        got["msg"] = ch.recv(timeout=3)
+
+    events, cfg = _listen_real_tls(make_window(), monkeypatch, decline)
+    incoming = next(v for k, v in events if k == "incoming")
+    assert incoming == {"fingerprint": cfg["stats"].peer_fingerprint, "sas": cfg["stats"].sas,
+                        "name": ""}
+    assert len(incoming["sas"]) == 8 and len(incoming["fingerprint"].split()) == 16
+    assert got["msg"] == (control.MSG_CALL_END, b"")
+    assert ("state", "declined") in events and events[-1] == ("done", None)
+
+
+def test_listener_hang_up_while_ringing_says_hung_up(monkeypatch):
+    win = make_window()
+    events, _ = _listen_real_tls(win, monkeypatch, lambda cfg, ch: win.stop_event.set())
+    assert ("state", "hung up") in events and events[-1] == ("done", None)
+
+
+def test_listener_accept_drains_stale_audio_then_starts_the_call(monkeypatch):
+    import socket
+    from hpqv import demo
+    calls, drained = [], []
+    real_drain = demo.drain_udp
+    monkeypatch.setattr(demo, "drain_udp", lambda s: drained.append(real_drain(s)))
+    monkeypatch.setattr(demo, "_run_call", lambda ch, udp, dest, args, **kw: calls.append(dest))
+
+    def accept(cfg, ch):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as tx:
+            tx.sendto(b"\x21" * 40, ("127.0.0.1", cfg["port"]))     # audio sent while ringing
+        time.sleep(0.1)
+        cfg["answers"].put(True)
+
+    events, _ = _listen_real_tls(make_window(), monkeypatch, accept)
+    assert calls == [("127.0.0.1", 5555)]
+    assert drained == [1]
+    assert ("state", "connected — talk") in events
+
+
+# ---------------- worker: pairing and the incoming-call prompt compose ----------------
+
+def test_friend_mode_listener_prompts_a_paired_friend_by_name(monkeypatch, tmp_path):
+    def decline(cfg, ch):
+        cfg["answers"].put(False)
+
+    events, _ = _listen_real_tls(make_window(), monkeypatch, decline, friend_home=tmp_path)
+    incoming = next(v for k, v in events if k == "incoming")
+    assert incoming["name"] == "bob"
+    assert ("state", "declined") in events
+
+
+@pytest.mark.parametrize("mode", ["call", "pair"])
+def test_friend_mode_listener_never_prompts_an_unpaired_caller(monkeypatch, tmp_path, mode):
+    """Trust needs a pin or a confirmed code: an unpaired caller fails the handshake
+    on the call port, so no Accept prompt (and no code) is ever shown for it, and the
+    call port does not run pairing either (that has its own window)."""
+    from hpqv import identity, pairflow, secure
+    win = make_window()
+    monkeypatch.setenv("HPQV_HOME", str(tmp_path))
+    pairflow.store().add(identity.new("alice").cert_pem)     # some other friend
+    t, cfg, mallory, listener, sock = _start_listener(win, monkeypatch, tmp_path, "mallory")
+    with pytest.raises(secure.HandshakeError):
+        secure.SecureChannel.establish(sock, "client", mallory,
+                                       listener.cert_pem if mode == "call" else None, mode=mode)
+    t.join(5)
+    assert not t.is_alive()
+    events = []
+    while not win.events.empty():
+        events.append(win.events.get_nowait())
+    assert not any(k == "incoming" for k, _ in events)
+    assert any(k == "state" and v.startswith("handshake failed") for k, v in events)
+    assert [f.label for f in pairflow.store().friends()] == ["alice"]
