@@ -1,9 +1,13 @@
 """FrameSource file mode: one pass by default, restart at EOF with loop=True."""
 import itertools
+import threading
 import time
 import wave
 
 from hpqv import demo
+from hpqv.controls import CallControls
+from hpqv.keyring import Keyring
+from hpqv.secure import MediaKeys
 from hpqv.audio import FRAME_BYTES, FS
 
 N = 5                                    # frames in the test WAV
@@ -129,3 +133,27 @@ def test_cli_listen_and_call_complete_a_real_call(tmp_path):
     for out in ("alice.wav", "bob.wav"):
         with wave.open(str(tmp_path / out), "rb") as w:
             assert w.getnframes() > 0
+
+
+class _FakeUdp:
+    def __init__(self):
+        self.sent = []
+
+    def sendto(self, dg, dest):
+        self.sent.append(dg)
+
+
+class _Frames:
+    def frames(self):
+        return iter([b"\x00" * FRAME_BYTES] * 3)
+
+
+def test_sender_records_the_exact_last_datagram_sent():
+    ring = Keyring(MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
+                             session_id=b"abcd"))
+    udp, stats = _FakeUdp(), demo.Stats()
+    assert stats.last_datagram == b""
+    demo._sender_loop(udp, ("127.0.0.1", 9), ring, _Frames(), CallControls(), stats,
+                      threading.Event())
+    assert len(udp.sent) == 3
+    assert stats.last_datagram == udp.sent[-1]

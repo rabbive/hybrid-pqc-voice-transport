@@ -4,11 +4,14 @@ import wave
 import pytest
 
 from hpqv.controls import CallControls, DEFAULTS
-from hpqv.gui_logic import (NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
+from hpqv.gui_logic import (NONE, NETWORK_KNOBS, PRESETS, SLIDERS, CallClock, end_text,
                             format_sas, handshake_rows, preset_values, rotate_button_state,
                             security_rows, snapshot_for_export, stat_tiles, validate_wav,
-                            wrap_fingerprint)
+                            wire_rows, wrap_fingerprint)
+from hpqv import packet
 from hpqv.demo import Stats, handshake_info
+from hpqv.keyring import Keyring
+from hpqv.secure import MediaKeys
 
 SPEC = {s.knob: s for s in SLIDERS}
 
@@ -242,3 +245,31 @@ def test_snapshot_for_export_is_independent_of_later_samples():
     live.events.clear()
     assert snap.rows == [{"t_s": 1.0}] and snap.events == [{"t": 1.0}]
     assert snap.marker == "kept" and snap is not live
+
+
+def test_wire_rows_before_any_datagram():
+    assert all(v == NONE for _, v in wire_rows(b""))
+
+
+def test_wire_rows_show_header_fields_and_only_ciphertext():
+    keys = MediaKeys(send_secret=b"\x01" * 32, recv_secret=b"\x02" * 32,
+                     session_id=b"\xab\xcd\x00\x01")
+    ring = Keyring(keys)
+    ring.rotate_next()                                # generation 1
+    dg = ring.seal(7, b"\x55" * 60, extra_flags=packet.FLAG_FEC)
+    rows = dict(wire_rows(dg))
+    assert rows["Size on the wire"] == f"{len(dg)} B (cap 1200 B)"
+    assert rows["Version/type"] == "0x21 (v2 voice)"
+    assert rows["Session id"] == "abcd0001"
+    assert rows["Sequence"] == "7"
+    assert rows["Key generation (mod 4)"] == "1"
+    assert rows["FEC hint"] == "on"
+    assert rows["Encrypted payload + tag"] == f"{len(dg) - 12} B"
+    assert "55 55 55" not in rows["Payload bytes (first 32)"]     # plaintext never appears
+    assert rows["Payload bytes (first 32)"].replace(" ", "").replace("\n", "") == dg[12:44].hex()
+
+
+def test_wire_rows_for_a_malformed_datagram():
+    rows = dict(wire_rows(b"\x00" * 40))
+    assert rows["Version/type"] == "not a v2 datagram"
+    assert rows["Sequence"] == NONE

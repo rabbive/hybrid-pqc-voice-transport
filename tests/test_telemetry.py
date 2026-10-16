@@ -355,12 +355,14 @@ def test_export_never_writes_the_sas_the_fingerprint_or_key_material(tmp_path):
     stats.sas, stats.peer_fingerprint = "c0ffee42", "dead beef " * 15 + "dead beef"
     stats.group, stats.cipher = "X25519MLKEM768", "TLS_AES_256_GCM_SHA384"
     stats.handshake_ms, stats.handshake_bytes = 41.5, 20000
+    stats.last_datagram = b"\x21" + b"\xee" * 60
     paths = tel.export(str(tmp_path / "out"))
-    assert not {"sas", "peer_fingerprint"} & set(COLUMNS)
+    assert not {"sas", "peer_fingerprint", "last_datagram"} & set(COLUMNS)
     for p in paths:
         if p.endswith((".csv", ".md")):
             text = open(p, encoding="utf-8").read().lower()
             assert "c0ffee42" not in text and "dead beef" not in text
+            assert "eeeeee" not in text and "xee" not in text
             assert "fingerprint" not in text and "sas" not in text.split()
     summary = open(paths[1], encoding="utf-8").read()
     assert "X25519MLKEM768" in summary and "20000 B" in summary     # public negotiation facts

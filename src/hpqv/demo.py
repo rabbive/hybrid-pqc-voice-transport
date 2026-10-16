@@ -288,6 +288,9 @@ class Stats:
         self.rx_transit_n = 0
         self.rx_transit_min_ms = 0.0
         self.max_datagram = 0        # largest UDP payload sent, bytes (cap: 1200)
+        # Exact bytes of the last datagram sent: header and ciphertext, what the
+        # network carries. For the screen only; telemetry never exports it.
+        self.last_datagram = b""
         self.key_gen = 0             # live key-rotation generation
         self.handshake_ms = 0.0
         self.handshake_bytes = 0
@@ -377,6 +380,7 @@ def _sender_loop(udp_sock, dest, ring, source, controls, stats, stop_event, seed
         with stats.lock:
             stats.sent += 1
             stats.max_datagram = max(stats.max_datagram, len(dg))
+            stats.last_datagram = dg
 
     delay_line = DelayLine(deliver, seed=None if seed is None else seed + 1)
     last_fec, last_bitrate = True, 0

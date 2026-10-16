@@ -8,6 +8,7 @@ import wave
 from dataclasses import dataclass
 from typing import Callable
 
+from hpqv import packet
 from hpqv.audio import CHANNELS, FS
 from hpqv.controls import DEFAULTS
 from hpqv.telemetry import JITTER_FRAME_MS
@@ -131,6 +132,33 @@ def wrap_fingerprint(fp: str, per_line: int = 4) -> str:
 def format_sas(sas: str) -> str:
     """The 8-hex-digit code as two groups of four, easier to read aloud."""
     return f"{sas[:4]} {sas[4:]}" if sas else sas
+
+
+WIRE_LABELS = ("Size on the wire", "Version/type", "Session id", "Sequence",
+               "Key generation (mod 4)", "FEC hint", "Encrypted payload + tag",
+               "Payload bytes (first 32)")
+
+
+def wire_rows(dg: bytes) -> list:
+    """(label, text) pairs for one sent datagram, as an observer on the wire sees it:
+    the cleartext header fields and the first 32 bytes of ciphertext. Never plaintext."""
+    if not dg:
+        return [(label, NONE) for label in WIRE_LABELS]
+    size = ("Size on the wire", f"{len(dg)} B (cap {packet.MAX_DATAGRAM} B)")
+    try:
+        session_id, seq, flags = packet.parse_header(dg)
+    except packet.Reject:
+        return [size, ("Version/type", "not a v2 datagram")] + [
+            (label, NONE) for label in WIRE_LABELS[2:]]
+    head = dg[packet.HEADER_LEN:packet.HEADER_LEN + 32].hex(" ")
+    return [size,
+            ("Version/type", f"0x{dg[0]:02x} (v2 voice)"),
+            ("Session id", session_id.hex()),
+            ("Sequence", str(seq)),
+            ("Key generation (mod 4)", str(flags & packet.GEN_MASK)),
+            ("FEC hint", "on" if flags & packet.FLAG_FEC else "off"),
+            ("Encrypted payload + tag", f"{len(dg) - packet.HEADER_LEN} B"),
+            ("Payload bytes (first 32)", head[:47] + "\n" + head[48:])]
 
 
 def security_rows(info: dict, stats: dict, live: bool, generation: int) -> list:
