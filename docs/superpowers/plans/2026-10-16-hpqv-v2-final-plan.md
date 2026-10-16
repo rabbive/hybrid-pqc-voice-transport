@@ -81,27 +81,79 @@ Phase B contract `docs/superpowers/plans/2026-10-16-secure-session-v2.md`.
 
 ## Phase B: finish the security foundation, then seamless pairing
 
-### Task 1: Apply the T6 security review
+### Task 1: Fix the T6 security review findings
+
+The report is saved at `docs/reviews/2026-10-16-t6-security-review.md`. T6 found
+no break of authentication or key secrecy. It found six defects and some doc
+mismatches.
 
 **Files:**
-- Create: `docs/reviews/2026-10-16-t6-security-review.md` (T6's final report, verbatim).
-- Modify: the files each confirmed finding names.
-- Test: the owning test file of each finding.
+- Modify: `src/hpqv/demo.py` (`_receiver_loop`, `_load_identity`, `listen`),
+  `src/hpqv/call.py` (`recv_stream`), `src/hpqv/udp.py` (`open_udp`),
+  `src/hpqv/secure.py` (`_context`, `media_keys`, error paths),
+  `src/hpqv/identity.py` (`load`), `src/hpqv/gui.py` (`_accept`),
+  `docs/PROTOCOL-v2.md`, `tests/test_demo_identity.py`.
+- Test: `tests/test_t6_regressions.py` (new) holds one test per finding.
 
-**Interfaces:** none new. A fix may tighten behaviour, but must not change any
-contract signature unless the finding requires it; record any such change in the
-review file.
+**Interfaces:**
+- `SecureChannel.media_keys()` may be called **once**; a second call raises
+  `RuntimeError("media keys already taken")`.
+- `identity.load(...)` raises `PermissionError` on POSIX when the key file mode
+  has any `0o077` bit set.
+- `demo.listen` and the GUI listener keep accepting after a failed handshake,
+  until a peer authenticates or the user cancels.
 
-- [ ] **Step 1:** Save the T6 thread's (`thr_abrqmxinkv`) final answer verbatim into the review file.
-- [ ] **Step 2:** For each finding T6 verified, write a regression test named
-  `test_t6_<short_slug>` that reproduces T6's scenario. Run it and see it fail.
-  Findings T6 marked plausible but unverified get a test only if you can
-  reproduce them; otherwise record "not reproduced" with the command you tried.
-- [ ] **Step 3:** Apply the minimal fix T6 proposed, or a smaller one.
-- [ ] **Step 4:** Run the full suite. Expected: green, with one more passing test per fixed finding.
-- [ ] **Step 5:** Append a "Disposition" table to the review file
-  (finding → fixed in commit / not reproduced / accepted risk, with the reason).
-  Commit: `fix(v2): address T6 security review findings`.
+- [ ] **Step 1: Write the failing tests**, one per finding:
+  - `test_t6_oversize_datagram_never_ends_call`: a Windows-like fake socket
+    whose `recvfrom(n)` raises `OSError(10040)` when the datagram is longer than
+    n, fed a 1,300 B datagram. Assert the receiver is still running,
+    `stop_event` is not set, and `rejects["oversize"] == 1`. Also cover
+    `ConnectionResetError` from `recvfrom`.
+  - `test_t6_same_identity_both_sides_refused`: `_load_identity` with the peer
+    cert equal to your own cert raises, with the message "this is your own
+    certificate…". `establish` with `trusted` containing your own key raises
+    `HandshakeError("bad_peer_cert")`.
+  - `test_t6_clienthello_offers_only_pq_group_and_mldsa`: a TCP capture of the
+    ClientHello shows `supported_groups == [0x11EC]`, one `key_share` entry of
+    1,216 B, and `signature_algorithms == [0x0905]`. The post-handshake group
+    check stays in place.
+  - `test_t6_media_keys_single_use`.
+  - `test_t6_world_readable_key_refused` (POSIX only).
+  - `test_t6_listener_survives_stray_connection`: a raw TCP connect-and-close,
+    then a real caller still connects.
+  - `test_t6_ssl_error_in_establish_closes_socket_and_raises_handshakeerror`:
+    monkeypatch `bio_write` to raise `SSL.Error`.
+  - Fix the useless check in `test_demo_does_not_import_liboqs_or_the_v1_handshake`:
+    assert `hpqv.eval.v1_handshake` is absent from `sys.modules`.
+- [ ] **Step 2:** Run `pytest tests/test_t6_regressions.py -q`. Expected: every test FAILS.
+- [ ] **Step 3:** Apply the fixes:
+  - **Receive buffer:** `recvfrom(65535)` in `_receiver_loop` and
+    `call.recv_stream`, so `parse_header` rejects oversize datagrams.
+    `ConnectionResetError` → `continue`.
+  - **Windows ICMP resets:** on Windows, `open_udp` calls
+    `sock.ioctl(socket.SIO_UDP_CONNRESET, False)`.
+  - **Own identity:** refuse it in `_load_identity` and in `establish`.
+  - **Restrict the offer:** in `secure._context`, call
+    `SSL._lib.SSL_CTX_set1_curves_list(ctx._context, b"X25519MLKEM768")` and
+    `SSL._lib.SSL_CTX_set1_sigalgs_list(ctx._context, b"mldsa65")`. If either
+    returns 1, raise. This is a private binding, so the post-handshake check
+    stays and a `ponytail:` comment names the fragility.
+  - **Single-use media keys.**
+  - **Key permissions:** check them in `identity.load`.
+  - **Listener:** loop in `listen` and `gui._accept`.
+  - **Error paths:** wrap `SSL.Error` from `bio_write` and from the READY send
+    as `HandshakeError("tls_error")`, and abort the socket.
+- [ ] **Step 4:** Correct the `docs/PROTOCOL-v2.md` mismatches T6 listed:
+  - §3: the real offer after the fix.
+  - §3: a v2 caller dialling a v1 listener gets `timeout`.
+  - §7.1: expired generations are purged before the AEAD, based on time only.
+  - §9: the `HandshakeError` wording.
+  - §12: the status and the filled rows.
+
+  Also add T6's "for a human cryptographer" list to the doc's "Unverified" section.
+- [ ] **Step 5:** Run the full suite. Expected: green, +8 tests.
+- [ ] **Step 6:** Append a "Disposition" table to the review file
+  (finding → commit), then commit: `fix(v2): address T6 security review findings`.
 
 ### Task 2: Trust policy in `secure.establish` and a 48-bit code
 
