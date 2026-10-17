@@ -31,11 +31,18 @@ def test_new_is_mldsa65_self_signed_with_cn():
     assert b"PRIVATE KEY" not in repr(ident).encode()
 
 
+def assert_private_key_file(path):
+    if os.name == "nt":   # Windows ignores mode bits; the key is protected by its ACL
+        identity._check_private_key_file(str(path))
+    else:
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600
+
+
 def test_save_creates_private_key_file_and_round_trips(tmp_path):
     ident = identity.new("listener")
     kp, cp = tmp_path / "listener.key", tmp_path / "listener.crt"
     identity.save(ident, str(kp), str(cp))
-    assert stat.S_IMODE(os.stat(kp).st_mode) == 0o600
+    assert_private_key_file(kp)
     loaded = identity.load(str(kp), str(cp))
     assert loaded == ident
 

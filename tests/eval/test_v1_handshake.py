@@ -114,7 +114,7 @@ def test_run_initiator_responder_over_tcp(ids):
 def test_nothing_outside_eval_imports_v1_handshake():
     offenders = [str(p.relative_to(SRC)) for p in SRC.rglob("*.py")
                  if "eval" not in p.relative_to(SRC).parts[:1]
-                 and "v1_handshake" in p.read_text()]
+                 and "v1_handshake" in p.read_text(encoding="utf-8")]
     assert offenders == []
 
 

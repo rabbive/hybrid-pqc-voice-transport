@@ -2,7 +2,6 @@
 import json
 import os
 import socket
-import stat
 import struct
 import threading
 import time
@@ -11,6 +10,7 @@ import pytest
 
 from hpqv import control, demo, identity, secure
 
+from test_identity import assert_private_key_file
 from v2pair import channels
 
 
@@ -24,7 +24,7 @@ def _keygen(tmp_path, name):
 
 def test_keygen_writes_a_private_key_0600_and_prints_the_fingerprint(tmp_path, capsys):
     key, cert = _keygen(tmp_path, "alice")
-    assert stat.S_IMODE(os.stat(key).st_mode) == 0o600
+    assert_private_key_file(key)
     ident = identity.load(key, cert)
     out = capsys.readouterr().out
     assert identity.fingerprint(ident.cert_pem) in out
