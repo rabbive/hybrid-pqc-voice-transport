@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
   push:
     branches: ["feat/desktop-demo-packages"]
+    tags: ["v*"]
   pull_request:
     paths:
       - "src/**"
@@ -84,3 +85,22 @@ jobs:
             dist/*.sha256
           if-no-files-found: error
           retention-days: 14
+
+  # A pushed v* tag attaches the tested packages to the release with that tag name
+  # (create it first, as a draft, so nothing is public until it is reviewed).
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: package
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/*.zip dist/*.sha256 --clobber
