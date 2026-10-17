@@ -646,6 +646,13 @@ def _fail(what, exc):
     sys.exit(f"{what}: {exc}")
 
 
+def _connect(host, port):
+    try:
+        return socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    except OSError as e:
+        sys.exit(f"could not reach {host}:{port}: {e.strerror or e}")
+
+
 def listen(args):
     ident, peer_cert = _identity_or_exit(args)
 
@@ -686,7 +693,7 @@ def call(args):
     port = int(port_s)
     ident, peer_cert = _identity_or_exit(args)
 
-    sock_tcp = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    sock_tcp = _connect(host, port)
     print(f"connected to {host}:{port}")
 
     stats = Stats()
@@ -792,7 +799,7 @@ def call_friend(args):
         except LookupError:
             sys.exit(f"{matches[0].label} is not visible on this network; "
                      "ask for their HOST:PORT and call that")
-    sock_tcp = socket.create_connection((host, port), timeout=CONNECT_TIMEOUT)
+    sock_tcp = _connect(host, port)
     stats = Stats()
     channel = udp_sock = None
     try:
@@ -853,6 +860,8 @@ def _pair_cmd(args):
         result = pairflow.connect_and_pair(host, port)
     except LookupError as e:
         sys.exit(str(e))
+    except OSError as e:
+        sys.exit(f"could not reach {args.target}: {e.strerror or e}")
     except HandshakeError as e:
         sys.exit("pairing refused: the other device has no pairing window open, is busy, "
                  f"or rejected this device ({e.reason})")

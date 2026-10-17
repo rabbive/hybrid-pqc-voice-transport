@@ -98,6 +98,16 @@ def test_cli_pair_then_call_by_pinned_identity(tmp_path):
         assert abs(_frames(tmp_path / heard) - _frames(wav)) <= 4 * FRAME_SAMPLES
 
 
+@pytest.mark.parametrize("cmd", ["call", "pair"])
+def test_cli_unreachable_address_exits_with_a_message_not_a_traceback(tmp_path, cmd):
+    (ra, _), (rb, _) = _pair(tmp_path)
+    assert ra == rb == 0
+    rc, out = _finish(_cli(tmp_path / "bob", cmd, f"127.0.0.1:{_free_port()}"), timeout=30)
+    assert rc != 0
+    assert "Traceback" not in out
+    assert "could not reach 127.0.0.1" in out
+
+
 def test_cli_mismatch_saves_nothing_on_either_side(tmp_path):
     (ra, oa), (rb, ob) = _pair(tmp_path, a_answer="y\n", b_answer="n\n")
     assert ra != 0 and rb != 0, (oa, ob)

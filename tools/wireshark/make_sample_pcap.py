@@ -44,8 +44,8 @@ def _pump(src, dst):
 def tls_session():
     """(records as [(from_caller, bytes)], client conn, server conn)."""
     caller, listener = identity.new("caller"), identity.new("listener")
-    c = SSL.Connection(secure._context(caller, listener.cert_pem, "client", []), None)
-    s = SSL.Connection(secure._context(listener, caller.cert_pem, "server", []), None)
+    c = SSL.Connection(secure._context(caller, secure._pins(listener.cert_pem), "client", []), None)
+    s = SSL.Connection(secure._context(listener, secure._pins(caller.cert_pem), "server", []), None)
     c.set_connect_state()
     s.set_accept_state()
     flights = []
