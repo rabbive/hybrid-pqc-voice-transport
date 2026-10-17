@@ -41,7 +41,7 @@ jobs:
         run: |
           python -m pip install -r packaging/requirements.txt
           python -m pip install --no-deps .
-      - name: Build native libraries
+      - name: Build native libraries (Opus)
         run: python packaging/build.py --native-only
       - name: Configure source-test library lookup
         shell: python
@@ -50,13 +50,12 @@ jobs:
           from pathlib import Path
           prefix = Path(".build/native").resolve()
           with open(os.environ["GITHUB_ENV"], "a") as f:
-              f.write(f"OQS_INSTALL_PATH={prefix}\n")
               if os.name != "nt":
                   f.write(f"DYLD_FALLBACK_LIBRARY_PATH={prefix / 'lib'}\n")
           with open(os.environ["GITHUB_PATH"], "a") as f:
               f.write(str(prefix / "bin") + "\n")
       - name: Test transport and identity
-        run: python -m pytest tests/test_demo_identity.py tests/test_handshake.py tests/test_control.py tests/test_packet.py tests/test_audio.py tests/test_call.py tests/test_session.py tests/test_jitter.py tests/test_loss_control.py -q
+        run: python -m pytest tests/test_identity.py tests/test_secure.py tests/test_pqc_kat.py tests/test_packet.py tests/test_replay.py tests/test_keyring.py tests/test_control.py tests/test_demo_identity.py tests/test_audio.py tests/test_call.py tests/test_jitter.py tests/test_loss_control.py tests/eval/test_v1_handshake.py -q
       - name: Freeze and archive
         run: python packaging/build.py --skip-native
       - name: Extract and test the shipped CLI

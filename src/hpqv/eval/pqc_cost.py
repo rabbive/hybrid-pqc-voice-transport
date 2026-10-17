@@ -1,12 +1,15 @@
+"""Cost of the v1 PQC handshake material (ML-KEM-768 + ML-DSA-65).
+
+Sizes are the v1 message sizes (see v1_handshake). The timing runs the same
+primitives through `cryptography`; results/*.csv were produced with the original
+C binding, so a re-run gives different (not comparable) milliseconds.
+"""
 import statistics
 import time
 
-import oqs
+from cryptography.hazmat.primitives.asymmetric import mldsa, mlkem
 
-from hpqv.handshake import KEM_ALG, SIG_ALG, KEM_PUB_LEN, SIG_PUB_LEN
-
-SIG_LEN = 3309
-KEM_CT_LEN = 1088
+from hpqv.eval.v1_handshake import KEM_CT_LEN, KEM_PUB_LEN, SIG_LEN, SIG_PUB_LEN
 
 HELLO_BYTES = KEM_PUB_LEN + SIG_PUB_LEN + SIG_LEN
 ACCEPT_BYTES = KEM_CT_LEN + SIG_LEN
@@ -20,16 +23,14 @@ def handshake_bytes(scheme: str) -> int:
 def _run_once() -> float:
     start = time.perf_counter()
 
-    kem = oqs.KeyEncapsulation(KEM_ALG)
-    kem_pub = kem.generate_keypair()
-    ct, shared_enc = kem.encap_secret(kem_pub)
-    shared_dec = kem.decap_secret(ct)
+    kem = mlkem.MLKEM768PrivateKey.generate()
+    shared_enc, ct = kem.public_key().encapsulate()
+    shared_dec = kem.decapsulate(ct)
 
-    signer = oqs.Signature(SIG_ALG)
-    sig_pub = signer.generate_keypair()
+    signer = mldsa.MLDSA65PrivateKey.generate()
     msg = b"hpqv-pqc-cost-benchmark"
     sig = signer.sign(msg)
-    oqs.Signature(SIG_ALG).verify(msg, sig, sig_pub)
+    signer.public_key().verify(sig, msg)
 
     return (time.perf_counter() - start) * 1000.0
 

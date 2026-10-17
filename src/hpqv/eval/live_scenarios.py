@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
-from hpqv import control, demo, handshake
+from hpqv import demo, secure
 from hpqv.audio import CHANNELS, FRAME_SAMPLES, FS
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
@@ -63,24 +63,8 @@ def _duration_wav(source, destination, seconds):
         out.writeframes(frames)
 
 
-def _session_pair():
-    listener_pub, listener_secret = handshake.make_identity()
-    caller_pub, caller_secret = handshake.make_identity()
-    accepted = {}
-    server = socket.create_server(("127.0.0.1", 0))
-    caller_tcp = socket.create_connection(server.getsockname())
-    listener_tcp, _ = server.accept()
-    server.close()
-    thread = threading.Thread(target=lambda: accepted.setdefault(
-        "listener", control.run_responder(listener_tcp, listener_pub, listener_secret, caller_pub)))
-    thread.start()
-    caller_session = control.run_initiator(caller_tcp, caller_pub, caller_secret, listener_pub)
-    thread.join()
-    return caller_tcp, listener_tcp, caller_session, accepted["listener"]
-
-
 def _run_loopback(source, received_path, knobs, seed):
-    caller_tcp, listener_tcp, caller_session, listener_session = _session_pair()
+    caller_channel, listener_channel = secure.local_pair()
     udp = {}
     peers = {}
     stop_events = {"caller": threading.Event(), "listener": threading.Event()}
@@ -100,17 +84,15 @@ def _run_loopback(source, received_path, knobs, seed):
         udp[role] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         udp[role].bind(("127.0.0.1", 0))
     return_path = received_path.with_name(f".{received_path.stem}-return.wav")
-    for role, tcp, other, session, stats, controls, seed_offset in (
-        ("caller", caller_tcp, "listener", caller_session, caller_stats, caller_controls,
-         0),
-        ("listener", listener_tcp, "caller", listener_session, listener_stats,
-         listener_controls, 10),
+    for role, channel, other, stats, controls, seed_offset in (
+        ("caller", caller_channel, "listener", caller_stats, caller_controls, 0),
+        ("listener", listener_channel, "caller", listener_stats, listener_controls, 10),
     ):
         args = demo.call_args(input="file", wav=str(source), seconds=0, output="file",
                               out_wav=str(received_path if role == "listener" else return_path))
         handle = CallHandle()
         thread = threading.Thread(target=demo._run_call, args=(
-            tcp, udp[role], udp[other].getsockname(), session, args),
+            channel, udp[role], udp[other].getsockname(), args),
             kwargs={"stats": stats, "controls": controls, "stop_event": stop_events[role],
                     "call_handle": handle, "rng_seed": seed + seed_offset, "quiet": True})
         peers[role] = (handle, thread)
@@ -136,7 +118,9 @@ def _run_loopback(source, received_path, knobs, seed):
             if thread.ident is not None:
                 thread.join(timeout=4)
             handle.finish()
-        for sock in (caller_tcp, listener_tcp, *udp.values()):
+        caller_channel.close()
+        listener_channel.close()
+        for sock in udp.values():
             sock.close()
         return_path.unlink(missing_ok=True)
 

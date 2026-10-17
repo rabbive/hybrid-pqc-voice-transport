@@ -63,8 +63,28 @@ def telemetry_export():
     return f"{len(pngs)} PNGs + csv + summary written"
 
 
+def secure_session():
+    """Real TLS 1.3 + X25519MLKEM768 + ML-DSA-65 handshake in-process, then mirrored media keys."""
+    from hpqv import secure
+    client, server = secure.local_pair()
+    try:
+        for ch in (client, server):
+            if ch.group != secure.GROUP or ch.protocol != secure.PROTOCOL:
+                raise RuntimeError(f"unexpected negotiation: {ch.protocol} {ch.group}")
+        ck, sk = client.media_keys(), server.media_keys()
+        if not (ck.send_secret == sk.recv_secret and ck.recv_secret == sk.send_secret
+                and ck.send_secret != ck.recv_secret and ck.session_id == sk.session_id):
+            raise RuntimeError("media keys are not mirrored")
+        if client.sas() != server.sas():
+            raise RuntimeError("SAS differs between peers")
+        return f"{client.protocol} {client.group}, {client.cipher}; media keys mirrored"
+    finally:
+        client.close()
+        server.close()
+
+
 def rotate_call():
-    from hpqv import control, demo, handshake as h
+    from hpqv import demo, secure
     from hpqv.audio import FS
     from hpqv.callctl import CallHandle
     with tempfile.TemporaryDirectory(prefix="hpqv rotate ") as tmp:
@@ -76,30 +96,18 @@ def rotate_call():
             w.setsampwidth(2)
             w.setframerate(FS)
             w.writeframes(pcm)
-        srv = socket.create_server(("127.0.0.1", 0))
-        caller_tcp = socket.create_connection(srv.getsockname())
-        listener_tcp, _ = srv.accept()
-        srv.close()
-        a_pub, a_sec = h.make_identity()
-        b_pub, b_sec = h.make_identity()
-        sessions = {}
-        t = threading.Thread(target=lambda: sessions.__setitem__(
-            "listener", control.run_responder(listener_tcp, b_pub, b_sec, a_pub)))
-        t.start()
-        sessions["caller"] = control.run_initiator(caller_tcp, a_pub, a_sec, b_pub)
-        t.join()
+        channels = dict(zip(("caller", "listener"), secure.local_pair()))
         udp = {}
         for role in ("caller", "listener"):
             udp[role] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp[role].bind(("127.0.0.1", 0))
         peers = {}
-        for role, tcp, other in (("caller", caller_tcp, "listener"),
-                                 ("listener", listener_tcp, "caller")):
+        for role, other in (("caller", "listener"), ("listener", "caller")):
             args = demo.call_args(input="file", wav=str(tmp / "tone.wav"), seconds=5,
                                   output="file", out_wav=str(tmp / f"{role}.wav"))
             handle, stats, stop = CallHandle(), demo.Stats(), threading.Event()
             thread = threading.Thread(target=demo._run_call, args=(
-                tcp, udp[role], udp[other].getsockname(), sessions[role], args),
+                channels[role], udp[role], udp[other].getsockname(), args),
                 kwargs=dict(stats=stats, stop_event=stop, call_handle=handle))
             peers[role] = (handle, stats, stop, thread)
         try:
@@ -108,12 +116,11 @@ def rotate_call():
             (hc, sc, _, tc), (hl, sl, _, tl) = peers["caller"], peers["listener"]
             if not _wait(lambda: sc.received > 20 and sl.received > 20, 10):
                 raise RuntimeError("no audio before rotation")
-            before = hc.key_fingerprint()
             hc.rotate_keys()
             if not _wait(lambda: sc.key_gen == 1 and sl.key_gen == 1, 5):
                 raise RuntimeError("rotation did not reach both peers")
-            if not hc.key_fingerprint() == hl.key_fingerprint() != before:
-                raise RuntimeError("key fingerprints differ after rotation")
+            if not hc.sas() == hl.sas():
+                raise RuntimeError("SAS differs between peers")
             rc, rl = sc.received, sl.received
             time.sleep(0.6)
             if sc.received - rc < 15 or sl.received - rl < 15:
@@ -126,12 +133,15 @@ def rotate_call():
             for *_, stop, thread in peers.values():
                 stop.set()
                 thread.join(timeout=3)
-            for s in (caller_tcp, listener_tcp, *udp.values()):
+            for channel in channels.values():
+                channel.close()
+            for s in udp.values():
                 s.close()
     return "file-to-file call rotated keys mid-call and completed"
 
 
-CHECKS = {"opus": opus_fec_and_version, "telemetry": telemetry_export, "rotate": rotate_call}
+CHECKS = {"opus": opus_fec_and_version, "secure": secure_session,
+          "telemetry": telemetry_export, "rotate": rotate_call}
 
 
 def main():

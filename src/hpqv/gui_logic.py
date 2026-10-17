@@ -4,10 +4,13 @@ Kept apart from the widgets so they are unit-testable and so there is one
 definition of every range and label shared by the sliders and the tests.
 """
 import copy
+import queue
+import time
 import wave
 from dataclasses import dataclass
 from typing import Callable
 
+from hpqv import packet
 from hpqv.audio import CHANNELS, FS
 from hpqv.controls import DEFAULTS
 from hpqv.telemetry import JITTER_FRAME_MS
@@ -88,6 +91,7 @@ SLIDERS = [
 NONE = "—"
 # demo.handshake_info() hard-codes 0: true by construction, not measured live.
 FRAGMENTS_BY_DESIGN = "(by design: handshake is on TCP)"
+SAS_HINT = "Say this code aloud: both of you must see the same one."
 
 
 def stat_tiles(stats: dict, row) -> list:
@@ -101,32 +105,107 @@ def stat_tiles(stats: dict, row) -> list:
         ("Late", str(stats["late"])),
         ("Recovered (FEC)", str(stats["recovered"])),
         ("Concealed", str(stats["concealed"])),
+        ("Rejected (forged/stray)", str(sum(stats["rejects"].values()))),
         ("Loss you hear", pct("interval_loss_pct")),
         ("Residual loss", pct("residual_loss_pct")),
         ("MOS (audio you hear)", f"{row['mos']:.2f}" if row else NONE),
     ]
 
 
-def handshake_rows(info, stats: dict) -> list:
-    """(label, text) pairs for the handshake panel. `info` is demo.handshake_info() or None."""
-    ms, biggest = stats["handshake_ms"], stats["max_datagram"]
-    if info:
-        cap = info["datagram_cap"]
-        facts = [("Key exchange", info["kem"]), ("Signature", info["sig"]),
-                 ("HELLO / ACCEPT / total",
-                  f"{info['hello_bytes']} / {info['accept_bytes']} / {info['total_bytes']} B"),
-                 ("Transport", info["transport"]),
-                 ("UDP fragments", f"{info['udp_fragments']} {FRAGMENTS_BY_DESIGN}")]
-    else:
-        cap = 1200
-        facts = [("Key exchange", "unavailable"), ("Signature", "unavailable"),
-                 ("HELLO / ACCEPT / total", NONE), ("Transport", "TCP"),
-                 ("UDP fragments", f"0 {FRAGMENTS_BY_DESIGN}")]
-    return facts + [("Handshake time", f"{ms:.1f} ms" if ms else NONE),
-                    ("Largest datagram", f"{biggest} B  (cap {cap} B)" if biggest else NONE)]
+def handshake_rows(info: dict, stats: dict) -> list:
+    """(label, text) pairs for the handshake panel. `info` is demo.handshake_info()."""
+    ms, biggest, size = stats["handshake_ms"], stats["max_datagram"], stats["handshake_bytes"]
+    negotiated = f"{stats['group']} / {stats['cipher']}" if stats["group"] else NONE
+    return [("Protocol", info["protocol"]), ("Key exchange", info["group"]),
+            ("Signature", info["sig"]), ("Transport", info["transport"]),
+            ("UDP fragments", f"{info['udp_fragments']} {FRAGMENTS_BY_DESIGN}"),
+            ("Negotiated", negotiated),
+            ("Handshake time", f"{ms:.1f} ms" if ms else NONE),
+            ("Handshake size", f"{size} B (TLS records, both ways)" if size else NONE),
+            ("Largest datagram", f"{biggest} B  (cap {info['datagram_cap']} B)" if biggest else NONE)]
+
+
+def wrap_fingerprint(fp: str, per_line: int = 4) -> str:
+    """16 groups of 4 hex digits, `per_line` groups a row, so it fits a narrow panel."""
+    groups = fp.split()
+    return "\n".join(" ".join(groups[i:i + per_line]) for i in range(0, len(groups), per_line))
+
+
+def format_sas(sas: str) -> str:
+    """The 8-hex-digit code as two groups of four, easier to read aloud."""
+    return f"{sas[:4]} {sas[4:]}" if sas else sas
+
+
+WIRE_LABELS = ("Size on the wire", "Version/type", "Session id", "Sequence",
+               "Key generation (mod 4)", "FEC hint", "Encrypted payload + tag",
+               "Payload bytes (first 32)")
+
+
+def wire_rows(dg: bytes) -> list:
+    """(label, text) pairs for one sent datagram, as an observer on the wire sees it:
+    the cleartext header fields and the first 32 bytes of ciphertext. Never plaintext."""
+    if not dg:
+        return [(label, NONE) for label in WIRE_LABELS]
+    size = ("Size on the wire", f"{len(dg)} B (cap {packet.MAX_DATAGRAM} B)")
+    try:
+        session_id, seq, flags = packet.parse_header(dg)
+    except packet.Reject:
+        return [size, ("Version/type", "not a v2 datagram")] + [
+            (label, NONE) for label in WIRE_LABELS[2:]]
+    head = dg[packet.HEADER_LEN:packet.HEADER_LEN + 32].hex(" ")
+    return [size,
+            ("Version/type", f"0x{dg[0]:02x} (v2 voice)"),
+            ("Session id", session_id.hex()),
+            ("Sequence", str(seq)),
+            ("Key generation (mod 4)", str(flags & packet.GEN_MASK)),
+            ("FEC hint", "on" if flags & packet.FLAG_FEC else "off"),
+            ("Encrypted payload + tag", f"{len(dg) - packet.HEADER_LEN} B"),
+            ("Payload bytes (first 32)", head[:47] + "\n" + head[48:])]
+
+
+def security_rows(info: dict, stats: dict, live: bool, generation: int) -> list:
+    """(label, text) pairs for the security panel.
+
+    The SAS and the peer fingerprint are shown to be compared by voice; they are
+    on screen only and never reach telemetry or exports. The rotation generation
+    is not part of the SAS: re-keying changes the media keys, not the session.
+    """
+    have = live and bool(stats["sas"])
+    return [("Protocol", info["protocol"] if live else NONE),
+            ("Key exchange", stats["group"] if have else NONE),
+            ("Key generation", str(generation) if live else NONE),
+            ("Peer fingerprint", wrap_fingerprint(stats["peer_fingerprint"]) if have else NONE),
+            ("Code to read aloud (SAS)", format_sas(stats["sas"]) if have else NONE)]
 
 
 # ---------------- call lifecycle ----------------
+
+def incoming_call_text(fingerprint: str, sas: str, name: str = "") -> str:
+    """Body of the incoming-call prompt: who is calling (their certificate's
+    fingerprint, and their name if they are a paired friend) and the code both
+    sides must read aloud before answering."""
+    who = f"Incoming call from {name} (paired)." if name else "Incoming call."
+    return (f"{who} The caller's certificate fingerprint is:\n\n"
+            f"{wrap_fingerprint(fingerprint)}\n\n"
+            f"Read this code aloud; the caller must see the same one:\n{format_sas(sas)}\n\n"
+            "Answer only if both match.")
+
+
+def wait_for_answer(answers, stop, timeout: float, tick: float = 0.2) -> bool:
+    """Worker side of the prompt: True only if Accept (True) arrives before `timeout`
+    and Hang up (`stop`) was not pressed. Decline, timeout and Hang up are all False."""
+    deadline = time.monotonic() + timeout
+    while not stop.is_set():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            answer = answers.get(timeout=min(tick, remaining))
+        except queue.Empty:
+            continue
+        return bool(answer) and not stop.is_set()
+    return False
+
 
 def validate_wav(path) -> "str | None":
     """Why `path` cannot be a call input, or None. Mirrors demo.FrameSource's checks."""
@@ -143,11 +222,30 @@ def validate_wav(path) -> "str | None":
     return None
 
 
-def end_text(hung_up: bool, peer_ended: bool) -> str:
-    """State-label text once the call is over; claims the peer only when it really ended it."""
+def pairing_prompt(code: str, label: str, fingerprint: str, key_changed: bool) -> tuple:
+    """(title, body) for the code-comparison dialog (B2)."""
+    body = (f"Pairing code:\n\n        {code}\n\n"
+            f"Other device: {label}\n({fingerprint[-19:]})\n\n"
+            "Read the code aloud with the other person. Press Yes only if their "
+            "screen shows exactly the same six digits.")
+    if key_changed:
+        body = (f"WARNING: you already have a friend called {label!r} with a different "
+                "key. Only continue if they really reinstalled or changed computer.\n\n"
+                + body)
+    return "Do the codes match?", body
+
+
+def end_text(hung_up: bool, peer_ended: bool, connection_lost: bool = False,
+             protocol_error: bool = False) -> str:
+    """State-label text once the call is over. It claims "by peer" only for an
+    authenticated CALL_END, and says "connection lost" when the TCP link just went."""
     if hung_up:
         return "hung up"
-    return "call ended by peer" if peer_ended else "call ended"
+    if protocol_error:
+        return "call ended: the other side broke the protocol"
+    if peer_ended:
+        return "call ended by peer"
+    return "connection lost" if connection_lost else "call ended"
 
 
 def rotate_button_state(live: bool, ready: bool) -> tuple:

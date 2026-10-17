@@ -7,7 +7,69 @@ IP-fragmented, and no voice datagram exceeds 1200 B.
 **Team:** Cain Manoj (23BCE1663) · Sreenandu G (23BCE1120) · Ashwanth Kumaravel (23BCE1244)
 **Guide:** Dr. Renuka Devi S.
 
-## The problem
+> **Two protocol versions live in this repository.**
+> **v2** (this branch, `docs/PROTOCOL-v2.md`) is real TLS 1.3 with the
+> X25519MLKEM768 hybrid key exchange and ML-DSA-65 authentication, plus no-files
+> pairing on the same Wi-Fi. It is **experimental and not externally reviewed**.
+> **v1** (release v0.1.0-demo.1, branch `experiment/cain`, everything under
+> `results/`) is the original hand-written handshake. The results, the evaluation
+> report and the desktop downloads below describe **v1** and are kept as history.
+> v2 does not interoperate with v1 and never falls back to it.
+
+## v2 quick start: pair once, then just call
+
+Both devices must be on the same Wi-Fi. On macOS set
+`DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` first (opuslib). Nothing needs
+to be copied between the devices: each creates its own key on first use and the
+private key never leaves it.
+
+**Pair (once per friend), CLI:**
+
+```bash
+# device A: open a 2-minute pairing window
+python -m hpqv.demo pair --allow
+# device B: list nearby devices, then pair with one by name or HOST:PORT
+python -m hpqv.demo peers
+python -m hpqv.demo pair <name | HOST:PORT>
+```
+
+Both screens show the same 6-digit code, for example `786 403`. **Read it out
+loud and compare it with the other person.** Both people answer `y` only if the
+codes are identical. Each device then saves the other as a friend. If either
+person says no, or nobody answers within 60 s, nothing is saved.
+
+**Call a friend, any time after that:**
+
+```bash
+python -m hpqv.demo listen --port 9000          # device A
+python -m hpqv.demo call <friend | HOST:PORT>   # device B
+```
+
+`call` takes a friend's name (found through discovery) or `HOST:PORT`. A call
+connects only to a paired friend; a stranger is refused.
+
+**GUI:** `python -m hpqv.gui`. Leave the three identity-file fields empty. Press
+*Allow new device (2 min)* on one machine and, on the other, type its
+`HOST:PORT` into *Pair with…*. Both people compare the code in the dialog and
+answer *Yes*. After that, *Listen* on one machine and *Call* its `HOST:PORT` on
+the other. The GUI does not list nearby devices yet; the CLI `peers` command does.
+
+**What to know.**
+
+- Pairing is **experimental**. The 6-digit code protects the pairing step only if
+  you really compare it. If both people press yes without comparing, an attacker
+  on the same network could be paired instead ([ADR-0006](docs/adr/0006-lan-pairing-tofu-with-code-confirmation.md)).
+- Campus and guest Wi-Fi often isolate clients and block broadcasts. The nearby
+  list is then empty and you must give `HOST:PORT`; if the network blocks TCP
+  between devices, use a phone hotspot or a home router.
+- `python -m hpqv.demo forget <name>` removes a friend. A friend who reinstalls
+  gets a new key: the app warns "key changed" and asks for a fresh code check.
+- The file-based flow still works and never pairs: `keygen`, then
+  `listen --key --cert --peer-cert` (see `python -m hpqv.demo --help`).
+
+Protocol and limits: [docs/PROTOCOL-v2.md](docs/PROTOCOL-v2.md).
+
+## The problem (v1, historical)
 
 Post-quantum keys are big. A single handshake here carries **10,842 bytes** of
 ML-KEM-768 and ML-DSA-65 material — over **7× the 1500-byte Internet MTU**. Sent
@@ -18,7 +80,7 @@ destroys the entire datagram.
 version, so the wire payload is 10,844 B — HELLO 6,446 B + ACCEPT 4,398 B — which is
 what the GUI handshake panel and `results/full_handshake.csv` report.)
 
-## The design
+## The v1 design (historical)
 
 | Channel | Transport | Carries |
 |---|---|---|
@@ -31,7 +93,7 @@ Linux the UDP socket also sets Don't-Fragment (`IP_PMTUDISC_DO`); the macOS and
 Windows builds do not set DF. Voice keeps UDP's latency; the oversized handshake
 gets TCP's reliability.
 
-## Headline results
+## Headline results (v1, historical)
 
 Measured on the real implementation under `tc netem` impairment — not simulated.
 
@@ -95,7 +157,7 @@ for frames it cannot rebuild.
 
 Full numbers, method and honest limitations: **[docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md)**.
 
-## Download the desktop demo
+## Download the desktop demo (v1)
 
 **[HPQV v0.1.0 Demo 1](https://github.com/rabbive/hybrid-pqc-voice-transport/releases/tag/v0.1.0-demo.1)** — portable apps with GUI and CLI; no separate Python installation needed.
 
@@ -110,21 +172,27 @@ Extract the entire ZIP and open HPQV. Use two computers on the same LAN, create 
 ```bash
 uv sync                       # Python 3.11, pinned
 uv run pytest -q --ignore=tests/test_gui_window.py
-                              # 192 pass on macOS; 16 container-only tests skip
+                              # macOS, 2026-10-16: 544 passed, 15 skipped
 ```
 
-The 16 skipped tests need `tc`/`tshark`/ns-3 and run only in the evaluation
+The 15 skipped tests need `tc`/`tshark`/ns-3 and run only in the evaluation
 container (below). The 9 Tk window tests in `tests/test_gui_window.py` run only
 from an interactive terminal or with `HPQV_GUI_TESTS=1` (they skip without a
 display, because Tk can abort the whole process on macOS when probed headless).
-Counts are from 2026-10-16 runs on `chore/factcheck-fixes`: 217 collected; with
-the window tests ignored, macOS gives 192 passed, 16 skipped and the Linux container
-207 passed, 1 skipped (its libopus 1.4 lacks `opus_packet_has_lbrr`).
+The counts are from a run on the v2 branch on 2026-10-16 (568 collected; the 9
+window tests are not in the 544). Two tests are timing- or network-sensitive on
+this machine and can fail intermittently; see "Known test instability" in
+`docs/PROTOCOL-v2.md` section 12. The earlier v1 figures (192 passed on macOS,
+207 in the Linux container) are no longer current and have not been re-measured.
 
 macOS needs `DYLD_FALLBACK_LIBRARY_PATH=/opt/homebrew/lib` for opuslib (see
 `docs/wire-format.md` → Runtime notes).
 
-## Run a real call
+## Run a real call with v1 (historical)
+
+This section and the commands in it are the **v1** flow (`identity.json`). The v2
+code on this branch does not read `identity.json` and refuses it; use the v2
+quick start above.
 
 For Windows and Apple Silicon app packages, see [Desktop demo setup](docs/DESKTOP-DEMO.md).
 The portable builds include a GUI and CLI and need no separate Python installation.
@@ -213,10 +281,12 @@ Outputs land in `results/` (committed, so the report can cite exact numbers).
 ## Layout
 
 ```
-src/hpqv/          handshake, control, packet, jitter, audio, playout (FEC/PLC), udp, call, session,
-                   keyring + callctl (live rotation, call end), controls + impair (live knobs),
+src/hpqv/          identity, secure (TLS 1.3 channel), pairing, trust, discovery, pairflow,
+                   listener, paths, control, packet, replay, jitter, audio, playout (FEC/PLC),
+                   udp, call, keyring + callctl (live rotation, call end), controls + impair (live knobs),
                    telemetry (receiver-side stats, live MOS, export), demo (CLI), gui* (live-demo window)
-src/hpqv/eval/     MOS (ITU-T G.107), capture, stats, baselines, netem, runner, graphs
+src/hpqv/eval/     MOS (ITU-T G.107), capture, stats, baselines, netem, runner, graphs,
+                   v1_handshake (the v1 handshake, kept for the historical experiments)
 ns3/               hpqv_sim.cc — the NS-3 secondary model (see ns3/README.md)
 eval/Dockerfile    the Linux evaluation environment
 scripts/           sweep drivers + table renderer
@@ -228,7 +298,9 @@ docs/              evaluation report, experiments, wire format, ADRs
 
 | Document | What it covers |
 |---|---|
-| [docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md) | Every test and result, method, limitations, metric glossary |
+| [docs/PROTOCOL-v2.md](docs/PROTOCOL-v2.md) | The v2 protocol: TLS 1.3 channel, identity, no-files pairing, discovery, key derivation, datagram, threat model, what is tested and what is not |
+| [docs/adr/0005-protocol-v2-tls13.md](docs/adr/0005-protocol-v2-tls13.md), [0006](docs/adr/0006-lan-pairing-tofu-with-code-confirmation.md) | Why v2 uses real TLS 1.3, and why pairing pins on first use after both users confirm a code (both Proposed) |
+| [docs/EVALUATION-REPORT.md](docs/EVALUATION-REPORT.md) | Every v1 test and result, method, limitations, metric glossary |
 | [docs/EXPERIMENT-handshake-survival.md](docs/EXPERIMENT-handshake-survival.md) | Does the handshake survive loss? |
 | [docs/EXPERIMENT-fec-recovery.md](docs/EXPERIMENT-fec-recovery.md) | Does Opus in-band FEC actually recover frames? |
 | [docs/EXPERIMENT-full-handshake.md](docs/EXPERIMENT-full-handshake.md) | Real authenticated handshake over TCP and one-datagram UDP under loss, with and without HELLO retry |
@@ -241,7 +313,16 @@ docs/              evaluation report, experiments, wire format, ADRs
 
 ## Status and limitations
 
-The implementation, evaluation and live-demo GUI are complete for this review.
+**v2 (this branch).** Phase B is implemented: TLS 1.3 control channel with
+X25519MLKEM768 and ML-DSA-65, v2 voice datagrams, and no-files pairing. It is
+experimental: not externally reviewed, no formal model, and the pairing exchange is
+our own application of a published pattern. Only 127.0.0.1 has been run for
+pairing; two real devices over real Wi-Fi, Linux and Windows, and the Tk window
+tests have not been run for this status. Details and the full list:
+`docs/PROTOCOL-v2.md` section 12. Everything below this paragraph is the **v1**
+status.
+
+The v1 implementation, evaluation and live-demo GUI are complete for this review.
 Known limitations are documented rather than hidden — see
 `docs/EVALUATION-REPORT.md` §12 and `ns3/README.md`.
 

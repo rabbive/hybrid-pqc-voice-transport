@@ -2,15 +2,14 @@
 import os
 from pathlib import Path
 import sys
-from PyInstaller.utils.hooks import copy_metadata
 
 root = Path(SPECPATH).parent
 prefix = Path(os.environ["HPQV_NATIVE_PREFIX"])
 is_mac = sys.platform == "darwin"
-names = ["liboqs.dylib", "libopus.dylib"] if is_mac else ["oqs.dll", "opus.dll"]
+names = ["libopus.dylib"] if is_mac else ["opus.dll"]
 native = prefix / ("lib" if is_mac else "bin")
 binaries = [(str(native / name), ".") for name in names]
-datas = copy_metadata("liboqs-python")
+datas = []
 for entry, name, console in [
     ("cli_entry.py", "hpqv-cli", True),
     ("gui_entry.py", "HPQV", False),

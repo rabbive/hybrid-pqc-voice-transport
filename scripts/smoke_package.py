@@ -1,4 +1,4 @@
-"""Exercise the actual frozen CLI with a real handshake and two-way WAV audio.
+"""Exercise the actual frozen CLI with a real v2 handshake (TLS 1.3, pinned ML-DSA-65 certs) and two-way WAV audio.
 
 Usage: python scripts/smoke_package.py /path/to/hpqv-cli[.exe]
 No third-party Python dependencies required by this test driver.
@@ -46,11 +46,11 @@ def smoke(executable):
     if not executable.is_file():
         raise RuntimeError(f"Packaged executable missing: {executable}")
     package = executable.parent.parent
-    for license_path in ("liboqs/LICENSE.txt", "opus/COPYING", "Python-LICENSE.txt"):
+    for license_path in ("opus/COPYING", "Python-LICENSE.txt"):
         if not (package / "licenses" / license_path).is_file():
             raise RuntimeError(f"Missing runtime license: {license_path}")
     env = os.environ.copy()
-    for key in ("OQS_INSTALL_PATH", "DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
+    for key in ("DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH",
                 "PYTHONPATH", "PYTHONHOME", "LD_LIBRARY_PATH"):
         env.pop(key, None)
     # Remove developer tools/library paths. A frozen app must stand alone.
@@ -65,8 +65,13 @@ def smoke(executable):
     smoke_gui(package, env)
     with tempfile.TemporaryDirectory(prefix="hpqv packaged test ") as tmp:
         work = Path(tmp)
-        subprocess.run([str(executable), "keygen", "--out", str(work / "identity.json")],
-                       cwd=work, env=env, check=True, timeout=30)
+        for role in ("listener", "caller"):
+            keygen = subprocess.run(
+                [str(executable), "keygen", "--name", role,
+                 "--key-out", str(work / f"{role}.key"), "--cert-out", str(work / f"{role}.pem")],
+                cwd=work, env=env, check=True, timeout=30, capture_output=True, text=True)
+            if not keygen.stdout.strip():
+                raise RuntimeError(f"{role}: keygen printed no fingerprint")
         samples = array.array("h", (int(8000 * math.sin(2 * math.pi * 440 * i / 48000))
                                    for i in range(48000 * 3)))
         if sys.byteorder != "little":
@@ -79,14 +84,17 @@ def smoke(executable):
             tcp.bind(("127.0.0.1", 0))
             port = tcp.getsockname()[1]
             udp.bind(("127.0.0.1", port))
-        common = ["--identity-file", str(work / "identity.json"),
-                  "--input", "file", "--wav", str(work / "input.wav"),
-                  "--output", "file"]
+        common = ["--input", "file", "--wav", str(work / "input.wav"), "--output", "file"]
+
+        def identity(role, peer):
+            return ["--key", str(work / f"{role}.key"), "--cert", str(work / f"{role}.pem"),
+                    "--peer-cert", str(work / f"{peer}.pem")]
+
         processes = []
         try:
             with (work / "listener.log").open("w") as listener_log, (work / "caller.log").open("w") as caller_log:
                 listener = subprocess.Popen(
-                    [str(executable), "listen", "--port", str(port), *common,
+                    [str(executable), "listen", "--port", str(port), *identity("listener", "caller"), *common,
                      "--out-wav", str(work / "listener.wav")],
                     stdout=listener_log, stderr=subprocess.STDOUT, cwd=work, env=env)
                 processes.append(listener)
@@ -96,7 +104,7 @@ def smoke(executable):
                         raise RuntimeError("Listener did not become ready")
                     time.sleep(0.1)
                 caller = subprocess.Popen(
-                    [str(executable), "call", f"127.0.0.1:{port}", *common,
+                    [str(executable), "call", f"127.0.0.1:{port}", *identity("caller", "listener"), *common,
                      "--out-wav", str(work / "caller.wav")],
                     stdout=caller_log, stderr=subprocess.STDOUT, cwd=work, env=env)
                 processes.append(caller)
@@ -104,9 +112,6 @@ def smoke(executable):
                     if process.wait(timeout=30) != 0:
                         raise RuntimeError("Packaged peer exited with an error")
             for role in ("listener", "caller"):
-                log = (work / f"{role}.log").read_text()
-                if "handshake complete" not in log:
-                    raise RuntimeError(f"{role}: handshake missing")
                 with wave.open(str(work / f"{role}.wav"), "rb") as wav:
                     if wav.getframerate() != 48000 or wav.getnframes() < 48000:
                         raise RuntimeError(f"{role}: less than one second of received audio")

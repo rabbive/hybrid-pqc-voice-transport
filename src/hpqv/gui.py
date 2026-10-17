@@ -15,6 +15,7 @@ worker threads and the UI polls shared state on an `after()` timer, because
 touching widgets (or Tk variables) from a worker thread is the classic way to
 crash tkinter. Telemetry is sampled from that same timer, once a second.
 """
+import os
 import queue
 import socket
 import struct
@@ -24,14 +25,17 @@ import tkinter as tk
 import tkinter.font as tkfont
 from tkinter import filedialog, messagebox, ttk
 
-from hpqv import control, demo
+from hpqv import control, demo, pairflow, pairing, paths
 from hpqv.callctl import CallHandle
 from hpqv.controls import CallControls
 from hpqv.gui_graph import GraphCanvas, SERIES
-from hpqv.gui_logic import (CallClock, end_text, snapshot_for_export, validate_wav)
+from hpqv.gui_logic import (CallClock, end_text, format_sas, incoming_call_text,
+                            pairing_prompt, snapshot_for_export, validate_wav,
+                            wait_for_answer)
 from hpqv.gui_network import NetworkPanel
-from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, SecurityPanel,
-                             StatsPanel)
+from hpqv.gui_panels import (ConnectionPanel, HandshakePanel, IncomingCallDialog,
+                             SecurityPanel, StatsPanel, WirePanel)
+from hpqv.secure import HandshakeError
 from hpqv.telemetry import Telemetry
 
 POLL_MS = 200
@@ -63,6 +67,9 @@ class DemoWindow:
         self._cc = CallClock(clock)        # graph time; freezes at hang-up
         self._last_sample = 0.0
         self._export_thread = None
+        self._answers = queue.Queue()      # Accept/Decline for the current call only
+        self._dialog = None                # open IncomingCallDialog, if any
+        self._ringing = False              # caller: connected, no audio from the peer yet
         self._build()
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         self.root.after(POLL_MS, self._poll)
@@ -75,6 +82,8 @@ class DemoWindow:
         style.configure("Value.TLabel", font=base.copy().actual() | {"weight": "bold"})
         style.configure("Mono.TLabel", font=tkfont.nametofont("TkFixedFont"))
         style.configure("State.TLabel", font=base.copy().actual() | {"weight": "bold", "size": 14})
+        style.configure("Sas.TLabel", font=tkfont.nametofont("TkFixedFont").actual()
+                        | {"weight": "bold", "size": 28})
 
     # ---------------- layout ----------------
 
@@ -102,9 +111,12 @@ class DemoWindow:
         left.add(net_tab, text="Network")
         left.add(sec_tab, text="Security")
         self.conn = ConnectionPanel(call_tab, self._create_identity)
-        self.handshake_panel = HandshakePanel(call_tab, _handshake_info())
+        self.info = demo.handshake_info()
+        self.handshake_panel = HandshakePanel(call_tab, self.info)
+        self._build_pairing(call_tab)
         self.network = NetworkPanel(net_tab, self.controls)
-        self.security = SecurityPanel(sec_tab, self._rotate)
+        self.security = SecurityPanel(sec_tab, self._rotate, self.info)
+        self.wire = WirePanel(sec_tab)
 
         self.stats_panel = StatsPanel(right)
         graph_box = ttk.LabelFrame(right, text="Last 60 s")
@@ -118,30 +130,116 @@ class DemoWindow:
         self.export_label = ttk.Label(right, text="", wraplength=640, justify="left")
         self.export_label.pack(fill="x", padx=6, pady=(0, 4))
 
+    # ---------------- pairing (B2) ----------------
+
+    def _build_pairing(self, parent):
+        box = ttk.LabelFrame(parent, text="Pair a device (no files)")
+        box.pack(fill="x", padx=6, pady=4)
+        self.pair_allow_btn = ttk.Button(box, text="Allow new device (2 min)",
+                                         command=self._allow_pairing)
+        self.pair_allow_btn.grid(row=0, column=0, columnspan=2, sticky="w", pady=2)
+        self.pair_target = tk.StringVar(value="192.168.1.42:9000")
+        ttk.Entry(box, textvariable=self.pair_target, width=22).grid(row=1, column=0, sticky="w")
+        self.pair_btn = ttk.Button(box, text="Pair with…", command=self._pair_with)
+        self.pair_btn.grid(row=1, column=1, sticky="w", padx=4)
+        self.pair_status = ttk.Label(box, text="Leave the identity files empty to call "
+                                                "paired devices.", wraplength=300)
+        self.pair_status.grid(row=2, column=0, columnspan=2, sticky="w", pady=(2, 0))
+
+    def _pairing_busy(self) -> bool:
+        busy = (self.worker and self.worker.is_alive()) or \
+               (getattr(self, "_pair_thread", None) and self._pair_thread.is_alive())
+        if busy:
+            self.events.put(("pair", "Finish or hang up the current call or pairing first."))
+        return bool(busy)
+
+    def _allow_pairing(self):
+        if self._pairing_busy():
+            return
+        port = int(self.conn.port.get())          # Tk variables: read on the main thread
+
+        def work():
+            try:
+                res = pairflow.allow_pairing(port, pairing.WINDOW_SECONDS, ask=self._ask_user,
+                                             on_event=lambda m: self.events.put(("pair", m)))
+                self.events.put(("pair", f"Paired with {res.friend.label}." if res else
+                                 "No device paired."))
+            except Exception as e:
+                self.events.put(("pair", f"Pairing failed: {e}"))
+        self._pair_thread = threading.Thread(target=work, daemon=True)
+        self._pair_thread.start()
+
+    def _pair_with(self):
+        if self._pairing_busy():
+            return
+        target = self.pair_target.get()
+
+        def work():
+            try:
+                self.events.put(("pair", f"Connecting to {target}…"))
+                host, port = pairflow.resolve(target, paths.device_identity(), pairing_only=True)
+                res = pairflow.connect_and_pair(host, port, ask=self._ask_user)
+                self.events.put(("pair", f"Paired with {res.friend.label}."))
+            except pairing.PairingFailed as e:
+                self.events.put(("pair", "Pairing failed: " + pairflow.FAILURE_TEXT[e.reason]))
+            except HandshakeError:
+                self.events.put(("pair", "Pairing refused: the other device has no pairing "
+                                         "window open, is busy, or is this device."))
+            except Exception as e:
+                self.events.put(("pair", f"Pairing failed: {e}"))
+        self._pair_thread = threading.Thread(target=work, daemon=True)
+        self._pair_thread.start()
+
+    def _ask_user(self, code, label, fingerprint, key_changed, cancel) -> bool:
+        """Called on a pairing worker thread: show the dialog on the Tk thread, wait."""
+        answered, box = threading.Event(), {}
+        title, body = pairing_prompt(code, label, fingerprint, key_changed)
+
+        def show():
+            box["ok"] = messagebox.askyesno(title, body)
+            answered.set()
+        self.root.after(0, show)
+        deadline = time.monotonic() + pairing.DECISION_TIMEOUT
+        while not answered.wait(0.1):
+            if cancel.is_set() or time.monotonic() > deadline:
+                return False      # ponytail: the dialog stays open; its answer is ignored
+        return box.get("ok", False) and not cancel.is_set()
+
     # ---------------- identity ----------------
 
     def _create_identity(self):
+        """Writes NAME.key (0600) and NAME.crt next to each other and shows the fingerprint.
+
+        Key generation takes milliseconds, so it stays on the main thread; the
+        handshake, which can take seconds, never does.
+        """
         path = filedialog.asksaveasfilename(
-            title="Save a new demo identity", initialfile="identity.json",
-            defaultextension=".json", filetypes=[("JSON", "*.json")])
+            title="Name your identity (writes NAME.key and NAME.crt)", initialfile="me")
         if not path:
             return
+        base = path[:-4] if path.lower().endswith((".key", ".crt")) else path
+        key_path, cert_path = base + ".key", base + ".crt"
         try:
-            demo.create_identity(path)
+            fingerprint = demo.create_identity(os.path.basename(base), key_path, cert_path)
         except FileExistsError:
-            messagebox.showerror("Identity already exists", "Choose a new filename to preserve your existing keys.")
+            messagebox.showerror("Identity already exists",
+                                 "Choose a new name to keep your existing keys.")
         except Exception as exc:
             messagebox.showerror("Could not create identity", str(exc))
         else:
-            self.conn.identity.set(path)
-            self.state_label.config(text="identity saved; copy it privately to your other computer")
+            self.conn.key.set(key_path)
+            self.conn.cert.set(cert_path)
+            self.conn.show_fingerprint(fingerprint)
+            self.state_label.config(
+                text="identity saved; send only the .crt to the other person")
 
     # ---------------- call control ----------------
 
     def _args(self, cfg):
         """The same argument object the CLI builds, so one code path serves both."""
         return demo.call_args(
-            identity_file=cfg["identity"], input=cfg["input"], wav=cfg["wav"],
+            key=cfg["key"], cert=cfg["cert"], peer_cert=cfg["peer_cert"],
+            input=cfg["input"], wav=cfg["wav"],
             record_wav=cfg["record_wav"], drop_pct=self.controls.get("loss_pct"),
             seconds=MIC_SECONDS,                 # run until Hang up
             loop=cfg["input"] == "file",         # a WAV restarts at EOF, so Hang up ends the call
@@ -163,7 +261,9 @@ class DemoWindow:
             if err:
                 messagebox.showerror("Cannot start", err)
                 return
-        cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle())
+        cfg.update(stop=threading.Event(), stats=demo.Stats(), handle=CallHandle(),
+                   answers=queue.Queue())   # fresh per call: a late answer cannot leak
+        self._answers = cfg["answers"]
         self.stop_event, self.stats, self.call_handle = cfg["stop"], cfg["stats"], cfg["handle"]
         self._hung_up = False
         self.start_btn.state(["disabled"])
@@ -176,6 +276,7 @@ class DemoWindow:
         """Hang up through the handle so the peer's call ends too."""
         self._hung_up = True
         self.stop_btn.state(["disabled"])
+        self._close_dialog()
         self.call_handle.hang_up()
         self.stop_event.set()              # also frees a worker still waiting in accept()
         self.state_label.config(text="hanging up…")
@@ -184,6 +285,7 @@ class DemoWindow:
         """Window X: hang up first so the peer gets CALL_END, then tear down."""
         self._closing = True               # _poll must not reschedule on a dead root
         try:
+            self._close_dialog()
             if self.worker and self.worker.is_alive():
                 self._hung_up = True
                 try:
@@ -201,9 +303,8 @@ class DemoWindow:
         return getattr(self.call_handle, "rotation_ready", lambda: True)()
 
     def _end_text(self):
-        # callctl only exposes the flag privately; it is set when the reader saw a
-        # peer CALL_END or the TCP close.
-        return end_text(self._hung_up, bool(getattr(self.call_handle, "_peer_ended", False)))
+        h = self.call_handle
+        return end_text(self._hung_up, h.peer_ended, h.connection_lost, h.protocol_error)
 
     def _rotate(self):
         if not self._rotation_ready():
@@ -229,15 +330,25 @@ class DemoWindow:
         return None, None
 
     def _run(self, cfg):
-        """Worker thread: set up the connection, then hand off to demo._run_call."""
-        srv = conn = udp = None
+        """Worker thread: set up the connection, then hand off to demo._run_call.
+
+        Every blocking step (accept, TLS handshake, waiting for CALL_START) is
+        bounded and runs here, never on the Tk thread.
+        """
+        srv = conn = udp = channel = None
         stats, stop, handle = cfg["stats"], cfg["stop"], cfg["handle"]
         put = self.events.put
         try:
             args = self._args(cfg)
+            if cfg.get("friends"):
+                ident, peer_cert = paths.device_identity(), pairflow.store().trusted_certs()
+                if not peer_cert:
+                    put(("state", "no paired devices yet: use Pair a device first"))
+                    return
+            else:
+                ident, peer_cert = demo._load_identity(args.key, args.cert, args.peer_cert)
             if cfg["mode"] == "listen":
                 put(("state", f"listening on {cfg['port']}…"))
-                sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "listener")
                 srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
                 srv.bind(("0.0.0.0", cfg["port"]))
@@ -247,36 +358,75 @@ class DemoWindow:
                     put(("state", "hung up"))
                     return
                 put(("state", f"handshake with {addr[0]}…"))
-                session = demo.timed_handshake("responder", conn, sig_pub, sig_secret, peer_pub, stats)
+                channel = demo.establish_timed("server", conn, ident, peer_cert, stats)
                 udp = demo._open_bound_udp(cfg["port"])
-                _t, payload = control.recv_control(conn)
-                (peer_port,) = struct.unpack(">H", payload)
-                dest = (addr[0], peer_port)
+                # Only a pinned key gets this far (a paired friend or the --peer-cert
+                # file); an unpaired device must pair first, in its own window.
+                friend = pairflow.store().get(stats.peer_fingerprint) if cfg.get("friends") else None
+                put(("incoming", {"fingerprint": stats.peer_fingerprint, "sas": stats.sas,
+                                  "name": friend.label if friend else ""}))
+                put(("state", "incoming call: compare the code, then Accept or Decline"))
+                if not wait_for_answer(cfg["answers"], stop, demo.ANSWER_TIMEOUT):
+                    try:
+                        channel.send(control.MSG_CALL_END)
+                    except OSError:
+                        pass
+                    put(("state", "hung up" if stop.is_set() else "declined"))
+                    return
+                put(("state", "waiting for the caller to start the call…"))
+                dest = demo.wait_call_start(channel, addr[0], stop_event=stop)
+                demo.drain_udp(udp)        # the caller's audio while it rang is stale
             else:
                 host, port_s = cfg["target"].rsplit(":", 1)
                 put(("state", f"connecting to {host}…"))
-                sig_pub, sig_secret, peer_pub = demo._load_identity(args.identity_file, "caller")
-                conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                conn.connect((host, int(port_s)))
+                conn = socket.create_connection((host, int(port_s)), timeout=demo.CONNECT_TIMEOUT)
                 put(("state", "handshake…"))
-                session = demo.timed_handshake("initiator", conn, sig_pub, sig_secret, peer_pub, stats)
+                channel = demo.establish_timed("client", conn, ident, peer_cert, stats)
                 udp = demo._open_bound_udp(0)
-                control.send_control(conn, control.MSG_CALL_START,
-                                     struct.pack(">H", udp.getsockname()[1]))
+                channel.send(control.MSG_CALL_START,
+                             struct.pack(">H", udp.getsockname()[1]))
                 dest = (host, int(port_s))
 
-            put(("connected", None))
-            put(("state", "connected — talk"))
-            demo._run_call(conn, udp, dest, session, args, stats=stats, controls=self.controls,
+            if cfg["mode"] == "call":
+                # The caller cannot tell when the listener presses Accept; first audio
+                # means it did, and the call clock and telemetry start then (_refresh).
+                put(("ringing", None))
+            else:
+                put(("connected", None))
+                put(("state", "connected — talk"))
+            demo._run_call(channel, udp, dest, args, stats=stats, controls=self.controls,
                            stop_event=stop, call_handle=handle)
             put(("state", self._end_text()))
+        except HandshakeError as e:
+            put(("state", "handshake failed: " + demo.handshake_failure_text(e.reason)))
+        except demo.CallSetupError as e:
+            put(("state", "hung up" if stop.is_set() else f"call not started: {e}"))
         except Exception as e:                      # surface failures in the UI, not a dead thread
             put(("state", f"error: {e}"))
         finally:
-            for s in (conn, srv, udp):
+            for s in (channel, conn, srv, udp):
                 if s is not None:
                     s.close()
             put(("done", None))
+
+    # ---------------- incoming-call prompt (main thread) ----------------
+
+    def _open_dialog(self, value):
+        self._close_dialog()
+        answers = self._answers
+
+        def on_answer(accepted):
+            self._dialog = None
+            answers.put(accepted)
+
+        self._dialog = IncomingCallDialog(
+            self.root, incoming_call_text(value["fingerprint"], value["sas"], value["name"]),
+            format_sas(value["sas"]), on_answer)
+
+    def _close_dialog(self):
+        dialog, self._dialog = self._dialog, None
+        if dialog is not None:
+            dialog.close()
 
     # ---------------- export ----------------
 
@@ -306,6 +456,13 @@ class DemoWindow:
 
     # ---------------- UI refresh (main thread only) ----------------
 
+    def _go_live(self):
+        """The call is up: start the graph clock and telemetry, allow key rotation."""
+        self._live = True
+        self._cc.start()
+        self._last_sample = self._clock()
+        self.telemetry = Telemetry(self.stats, self.controls)
+
     def _sample(self):
         self.telemetry.sample(self._cc.now())
         self._last_sample = self._clock()
@@ -318,11 +475,15 @@ class DemoWindow:
                 return
             if kind == "state":
                 self.state_label.config(text=value)
+            elif kind == "pair":
+                self.pair_status.config(text=value)
+            elif kind == "incoming":
+                self._open_dialog(value)
+            elif kind == "ringing":
+                self._ringing = True
+                self.state_label.config(text="ringing — waiting for them to answer")
             elif kind == "connected":
-                self._live = True
-                self._cc.start()
-                self._last_sample = self._clock()
-                self.telemetry = Telemetry(self.stats, self.controls)
+                self._go_live()
             elif kind == "exported":
                 self.export_btn.state(["!disabled"])
                 self.export_label.config(text="Exported:\n" + "\n".join(value))
@@ -335,6 +496,8 @@ class DemoWindow:
                     if self._live:
                         self._sample()      # close the last partial interval for export
                 finally:                    # never leave Start locked, whatever the sample did
+                    self._close_dialog()
+                    self._ringing = False
                     self._live = False
                     self._cc.freeze()       # keep the finished call on screen
                     self.start_btn.state(["!disabled"])
@@ -348,10 +511,15 @@ class DemoWindow:
             self._sample()
         rows = self.telemetry.rows if self.telemetry else []
         stats = self.stats.as_dict()
+        if self._ringing and stats["received"] > 0:
+            self._ringing = False
+            self._go_live()
+            self.state_label.config(text="connected — talk")
         self.stats_panel.update(stats, rows[-1] if rows else None, self.stats.levels())
         self.handshake_panel.update(stats)
-        self.security.update(self._live, self.call_handle.key_generation(),
-                             self.call_handle.key_fingerprint(), ready=self._rotation_ready())
+        self.security.update(self._live, self.call_handle.key_generation(), stats,
+                             ready=self._rotation_ready())
+        self.wire.update(stats["last_datagram"] if self._live else b"")
         if rows or self.telemetry:
             self.graph.redraw(rows, self.telemetry.events if self.telemetry else [],
                               self._cc.now())
@@ -366,13 +534,6 @@ class DemoWindow:
         finally:
             if not self._closing:
                 self.root.after(POLL_MS, self._poll)
-
-
-def _handshake_info():
-    try:
-        return demo.handshake_info()
-    except Exception:                  # liboqs missing: the panel says so instead of blocking the window
-        return None
 
 
 def main():
