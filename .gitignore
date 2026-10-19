@@ -7,3 +7,4 @@ dist/
 .build/
 identity.json
 .DS_Store
+.verify/

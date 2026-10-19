@@ -54,3 +54,45 @@ def plot_loss_vs_success(rows, out_png):
     return _plot(rows, out_png, "loss_pct", "success_pct",
                  "Packet loss (%)", "Handshake success (%)",
                  "Handshake completion vs packet loss")
+
+
+# Categorical slots 1 and 2 of the dataviz reference palette (CVD-validated pair).
+_MODE_COLORS = ["#2a78d6", "#eb6834"]
+_BENCH_PANELS = [("handshake_ms", "Handshake time (ms)", "{:.1f}"),
+                 ("handshake_bytes", "Bytes on the wire", "{:,.0f}"),
+                 ("cpu_ms", "CPU time (ms)", "{:.1f}")]
+
+
+def plot_handshake_bench(summary, out_png, labels=None):
+    """One panel per metric (different units, so no shared axis): median bar,
+    p25-p75 whisker, value at the tip, ratio of first mode to second in the title."""
+    modes = list(summary)
+    names = [(labels or {}).get(m, m) for m in modes]
+    fig, axes = plt.subplots(1, len(_BENCH_PANELS), figsize=(12, 2.8))
+    for ax, (key, title, fmt) in zip(axes, _BENCH_PANELS):
+        s = [summary[m][key] for m in modes]
+        med = [x["median"] for x in s]
+        err = [[x["median"] - x["p25"] for x in s], [x["p75"] - x["median"] for x in s]]
+        y = range(len(modes))
+        ax.barh(y, med, height=0.5, color=_MODE_COLORS[:len(modes)],
+                xerr=err, error_kw={"ecolor": "#52514e", "elinewidth": 1, "capsize": 3})
+        xmax = max(x["p75"] for x in s) * 1.3
+        for i, (m, x) in enumerate(zip(med, s)):
+            ax.text(max(m, x["p75"]) + xmax * 0.03, i, fmt.format(m), va="center",
+                    color="#0b0b0b")
+        ax.set_yticks(list(y), names)
+        ax.invert_yaxis()
+        ax.set_xlim(0, xmax)
+        ax.set_title(f"{title}: {med[0] / med[1]:.1f}×", loc="left")
+        ax.grid(True, axis="x", alpha=0.3)
+        for side in ("top", "right"):
+            ax.spines[side].set_visible(False)
+    for ax in axes[1:]:
+        ax.set_yticklabels([])
+    fig.suptitle(f"{names[0].splitlines()[0]} vs {names[1].splitlines()[0]}: "
+                 "median, whisker p25-p75, title shows the ratio", x=0.01, ha="left",
+                 color="#52514e", fontsize=9)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_png

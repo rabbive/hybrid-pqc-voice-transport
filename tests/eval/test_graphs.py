@@ -9,3 +9,11 @@ def test_writes_png(tmp_path):
              "ttfb_ms":80,"delay_ms":50} for l in (0,10,20,30)]
     p = graphs.plot_loss_vs_mos(rows, str(tmp_path/"mos.png"))
     assert os.path.getsize(p) > 0
+
+
+def test_handshake_bench_png(tmp_path):
+    q = {"median": 2, "p25": 1, "p75": 3}
+    summary = {m: {k: q for k in ("handshake_ms", "handshake_bytes", "cpu_ms")}
+               for m in ("hybrid", "classical")}
+    p = graphs.plot_handshake_bench(summary, str(tmp_path/"bench.png"))
+    assert os.path.getsize(p) > 0

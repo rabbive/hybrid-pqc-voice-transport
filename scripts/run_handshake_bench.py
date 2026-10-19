@@ -1,5 +1,5 @@
 """Hybrid (X25519MLKEM768 + ML-DSA-65) vs classical-only (x25519 + Ed25519) TLS 1.3
-handshake on loopback, no impairment. Writes handshake_bench.csv and .json.
+handshake on loopback, no impairment. Writes handshake_bench.csv, .json and .png.
 
     python scripts/run_handshake_bench.py --n 50 --out results/v2
 """
@@ -20,7 +20,7 @@ import OpenSSL
 from cryptography.hazmat.backends.openssl import backend
 
 from hpqv import identity, secure
-from hpqv.eval import classical_baseline
+from hpqv.eval import classical_baseline, graphs
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIELDS = ["mode", "handshake_ms", "handshake_bytes", "cpu_ms", "group"]
@@ -126,6 +126,9 @@ def main(argv=None) -> int:
     with open(os.path.join(out, "handshake_bench.json"), "w") as f:
         json.dump({"meta": info, "summary": summary, "rows": rows}, f, indent=2)
         f.write("\n")
+    graphs.plot_handshake_bench(summary, os.path.join(out, "handshake_bench.png"), {
+        "hybrid": "Hybrid PQ\nX25519MLKEM768 + ML-DSA-65",
+        "classical-BENCHMARK-ONLY": "Classical baseline\nx25519 + Ed25519"})
     for mode, s in summary.items():
         print(f"{mode:>24}: median {s['handshake_ms']['median']:.2f} ms, "
               f"{s['handshake_bytes']['median']:.0f} B, cpu {s['cpu_ms']['median']:.2f} ms")
