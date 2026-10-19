@@ -14,6 +14,9 @@ re-running the harness.
 | `full_handshake.csv` | `scripts/run_full_handshake.py` | Full authenticated handshake over TCP / naive UDP / UDP with retry under one 3 s deadline, 100 attempts/cell |
 | `fec_recovery.csv` | `scripts/run_fec_recovery.py` | Offline Opus in-band FEC recovery (segmental SNR) vs loss |
 | `*.png` | the same scripts | The figures for the report |
+| `v2/handshake_bench.{csv,json,png}` | `scripts/run_handshake_bench.py --n 50 --out results/v2` | **v2** TLS 1.3 handshake on loopback: hybrid (X25519MLKEM768 + ML-DSA-65) vs a benchmark-only classical baseline (x25519 + Ed25519), 50 interleaved runs. Machine, versions, load average and metric definitions are in the JSON `meta`. `git_dirty: true` there is untracked `.claude/` tooling only. |
+
+Everything above `v2/` was measured on **v1**; `v2/` holds the first v2 measurements.
 
 Regenerate everything with the commands in `docs/EVALUATION-REPORT.md` §13.
 Numbers vary slightly between runs (network measurement is sampled, not deterministic) —
